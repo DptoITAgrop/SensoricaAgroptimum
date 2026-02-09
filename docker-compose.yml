@@ -2,9 +2,7 @@ version: "3.8"
 
 services:
   iot-agrop:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/DPtoITAgrop/sensoricaagroptimum:latest
     container_name: iot-agrop
     restart: unless-stopped
     environment:
