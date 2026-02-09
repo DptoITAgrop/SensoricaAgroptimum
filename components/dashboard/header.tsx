@@ -85,7 +85,7 @@ export function Header({
           <div className="flex items-center gap-2">
             <div className="p-1 rounded-lg border border-border bg-secondary">
               <Image
-                src="/AG%20Cuadrado%20Blanco.png"
+                src="/ag-cuadrado-blanco.png"
                 alt="AG - Logo"
                 width={28}
                 height={28}
