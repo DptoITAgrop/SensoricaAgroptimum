@@ -66,7 +66,7 @@ export default function LoginPage() {
     <div className="min-h-screen relative flex items-center justify-center p-4 overflow-hidden">
       {/* Background image */}
       <Image
-        src="/Campo de pistachos.png"
+        src="/campo-de-pistachos.png"
         alt="Campo de pistachos"
         fill
         priority
@@ -86,7 +86,7 @@ export default function LoginPage() {
             <div className="flex justify-center">
               <div className="p-3 rounded-2xl bg-white/5 border border-white/10 shadow-[0_10px_30px_rgba(0,0,0,0.35)]">
                 <Image
-                  src="/AG Cuadrado Blanco.png"
+                  src="/ag-cuadrado-blanco.png"
                   alt="Agroptimum"
                   width={76}
                   height={76}
@@ -120,7 +120,10 @@ export default function LoginPage() {
 
               {/* Username */}
               <div className="space-y-2">
-                <Label htmlFor="username" className="text-sm font-medium text-white/90">
+                <Label
+                  htmlFor="username"
+                  className="text-sm font-medium text-white/90"
+                >
                   Usuario
                 </Label>
                 <div className="relative">
@@ -140,7 +143,10 @@ export default function LoginPage() {
 
               {/* Password */}
               <div className="space-y-2">
-                <Label htmlFor="password" className="text-sm font-medium text-white/90">
+                <Label
+                  htmlFor="password"
+                  className="text-sm font-medium text-white/90"
+                >
                   Contraseña
                 </Label>
                 <div className="relative">
@@ -160,7 +166,9 @@ export default function LoginPage() {
                     type="button"
                     onClick={() => setShowPassword((v) => !v)}
                     className="absolute right-3 top-1/2 -translate-y-1/2 text-white/55 hover:text-white transition-colors"
-                    aria-label={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
+                    aria-label={
+                      showPassword ? "Ocultar contraseña" : "Mostrar contraseña"
+                    }
                   >
                     {showPassword ? (
                       <EyeOff className="h-4 w-4" />
