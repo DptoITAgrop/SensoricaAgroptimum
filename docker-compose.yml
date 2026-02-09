@@ -2,15 +2,14 @@ version: "3.8"
 
 services:
   iot-agrop:
-    name: iot-agrop
     build:
       context: .
       dockerfile: Dockerfile
     container_name: iot-agrop
     restart: unless-stopped
     environment:
-      - NODE_ENV=production
-      - PORT=8099
-      - HOSTNAME=0.0.0.0
+      NODE_ENV: production
+      PORT: 8099
+      HOSTNAME: 0.0.0.0
     ports:
       - "8099:8099"
