@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  iot-app:
+    container_name: agroptimum-iot
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8099:8099"
+    environment:
+      NODE_ENV: production
+      PORT: "8099"
+      HOSTNAME: "0.0.0.0"
+      # Si usas NextAuth / URLs absolutas, descomenta y ajusta:
+      # NEXTAUTH_URL: "https://iot.agroptimum.com"
+      # NEXT_PUBLIC_APP_URL: "https://iot.agroptimum.com"
+    # Si necesitas .env en el servidor, puedes usar:
+    # env_file:
+    #   - .env.production
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8099/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
