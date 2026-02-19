@@ -64,6 +64,43 @@ function parseMetrics(
   return found ? [found] : [];
 }
 
+/**
+ * Sensores de suelo/EC: heurística por columnas.
+ * Si tiene señales típicas de suelo, lo marcamos como "soil".
+ */
+function isSoilSensorByColumns(columnNames: string[]) {
+  const lower = columnNames.map((c) => c.toLowerCase());
+  const soilSignals = [
+    "conductivity",
+    "conductividad",
+    "ec",
+    "ece",
+    "soil",
+    "soil_moisture",
+    "soilmoisture",
+    "vwc",
+    "smtc",
+    "moisture",
+    "humedad_suelo",
+    "water_content",
+  ];
+  return soilSignals.some((sig) => lower.some((c) => c === sig || c.includes(sig)));
+}
+
+/**
+ * Busca una columna existente por candidatos (case-insensitive, exact o includes)
+ */
+function pickColumn(columns: string[], candidates: string[]) {
+  const lower = columns.map((c) => c.toLowerCase());
+  for (const cand of candidates) {
+    const idx = lower.findIndex(
+      (c) => c === cand.toLowerCase() || c.includes(cand.toLowerCase())
+    );
+    if (idx >= 0) return columns[idx];
+  }
+  return null;
+}
+
 export async function GET(
   request: Request,
   { params }: { params: Promise<RouteParams> | RouteParams }
@@ -95,17 +132,77 @@ export async function GET(
 
     const dateColumn = pickDateColumn(columnNames);
 
-    // Decide qué columnas devolver (si no se especifica, devolvemos *)
-    const metricCols = parseMetrics(columnNames, metric, metrics);
+    // ---- Clasificación del sensor (soil vs ambient)
+    const soilByCols = isSoilSensorByColumns(columnNames);
+    const sensorType: "soil" | "ambient" = soilByCols ? "soil" : "ambient";
 
-    // SELECT
+    // ---- Decide qué columnas devolver
+    // 1) Si viene metrics explícito: respetamos
+    let metricCols = parseMetrics(columnNames, metric, metrics);
+
+    // 2) Si NO viene metrics y no ha encontrado nada: defaults por tipo
+    if (!metrics && metricCols.length === 0) {
+      const temp = pickColumn(columnNames, ["temperature", "temperatura", "temp"]);
+
+      if (sensorType === "ambient") {
+        const hum = pickColumn(columnNames, ["humidity", "humedad", "rh"]);
+        metricCols = [temp, hum].filter(Boolean) as string[];
+      } else {
+        const soilMoist = pickColumn(columnNames, [
+          "soilMoisture",
+          "soil_moisture",
+          "humedad_suelo",
+          "moisture",
+          "water_content",
+          "vwc",
+        ]);
+        const cond = pickColumn(columnNames, [
+          "conductivity",
+          "conductividad",
+          "ec",
+          "ece",
+        ]);
+        metricCols = [temp, soilMoist, cond].filter(Boolean) as string[];
+      }
+    }
+
+    // Si aún así nada, intentamos los "clásicos" que existan
+    if (metricCols.length === 0 && !metrics) {
+      const defaults = ["temperature", "humidity", "soilMoisture", "conductivity"];
+      metricCols = defaults
+        .map((d) => columnNames.find((c) => c.toLowerCase() === d.toLowerCase()))
+        .filter(Boolean) as string[];
+    }
+
+    // ---- SELECT
+    // ✅ devolvemos también ts (epoch ms) en UTC si es posible
+    // Nota: CONVERT_TZ requiere tablas de zona horaria cargadas; si falla, hacemos fallback.
+    const selectParts: string[] = [];
+
+    if (dateColumn) {
+      const dc = escapeId(dateColumn);
+      selectParts.push(dc);
+
+      // Intento UTC: UNIX_TIMESTAMP(CONVERT_TZ(dt, @@session.time_zone, '+00:00')) * 1000
+      // Fallback: UNIX_TIMESTAMP(dt) * 1000
+      selectParts.push(`
+        (
+          CASE
+            WHEN CONVERT_TZ(${dc}, @@session.time_zone, '+00:00') IS NULL
+              THEN (UNIX_TIMESTAMP(${dc}) * 1000)
+            ELSE (UNIX_TIMESTAMP(CONVERT_TZ(${dc}, @@session.time_zone, '+00:00')) * 1000)
+          END
+        ) AS ts
+      `);
+    }
+
+    for (const c of metricCols) selectParts.push(escapeId(c));
+
     const selectClause =
-      metricCols.length > 0 || dateColumn
-        ? `SELECT ${[
-            ...(dateColumn ? [escapeId(dateColumn)] : []),
-            ...metricCols.map((c) => escapeId(c)),
-          ]
-            // evita duplicados si dateColumn coincide con alguna métrica
+      selectParts.length > 0
+        ? `SELECT ${selectParts
+            .map((s) => s.trim())
+            // evita duplicados
             .filter((v, i, arr) => arr.indexOf(v) === i)
             .join(", ")}`
         : "SELECT *";
@@ -113,10 +210,16 @@ export async function GET(
     let query = `${selectClause} FROM ${escapeId(sensorId)}`;
     const queryParams: Array<string> = [];
 
-    // WHERE por rango
+    // WHERE por rango (soporta start solo, end solo, o ambos)
     if (dateColumn && startDate && endDate) {
       query += ` WHERE ${escapeId(dateColumn)} BETWEEN ? AND ?`;
       queryParams.push(startDate, endDate);
+    } else if (dateColumn && startDate && !endDate) {
+      query += ` WHERE ${escapeId(dateColumn)} >= ?`;
+      queryParams.push(startDate);
+    } else if (dateColumn && !startDate && endDate) {
+      query += ` WHERE ${escapeId(dateColumn)} <= ?`;
+      queryParams.push(endDate);
     }
 
     // ORDER
@@ -129,15 +232,46 @@ export async function GET(
 
     const [rows] = await connection.query(query, queryParams);
 
+    // Info de TZ de sesión/servidor para auditoría
+    let serverTimeZone: any = null;
+    try {
+      const [tzRows] = await connection.query(
+        `SELECT @@session.time_zone AS session_tz, @@global.time_zone AS global_tz`
+      );
+      serverTimeZone = (tzRows as any[])?.[0] ?? null;
+    } catch {
+      // noop
+    }
+
+    // métricas “disponibles” útiles para UI
+    const availableMetrics = {
+      hasTemperature: !!pickColumn(columnNames, ["temperature", "temperatura", "temp"]),
+      hasHumidity: !!pickColumn(columnNames, ["humidity", "humedad", "rh"]),
+      hasSoilMoisture: !!pickColumn(columnNames, [
+        "soilMoisture",
+        "soil_moisture",
+        "humedad_suelo",
+        "moisture",
+        "water_content",
+        "vwc",
+      ]),
+      hasConductivity: !!pickColumn(columnNames, ["conductivity", "conductividad", "ec", "ece"]),
+    };
+
     return NextResponse.json({
       farmId,
       sensorId,
+      sensorType, // ✅ soil | ambient
       columns: columnNames,
       data: rows,
       dateColumn,
+      // para el front: usa ts como x-axis
+      hasTs: !!dateColumn,
       selectedMetrics: metricCols,
+      availableMetrics,
       order: order.toLowerCase(),
       limit,
+      serverTimeZone,
     });
   } catch (error) {
     console.error("Error fetching sensor data:", error);

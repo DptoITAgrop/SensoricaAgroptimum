@@ -4,7 +4,8 @@ import { useMemo } from "react";
 import useSWR from "swr";
 
 export type TimeSeriesPoint = {
-  date: string; // datetime ISO o string
+  date: string; // ISO string (solo para mostrar/tooltips si quieres)
+  ts?: number; // epoch ms (RECOMENDADO para el eje X)
   temperature?: number | null;
   humidity?: number | null;
   soilMoisture?: number | null;
@@ -18,19 +19,16 @@ type UseSensorTimeSeriesArgs = {
   farmId?: string;
   sensorId?: string;
 
-  // Rango rápido
   preset?: RangePreset;
 
-  // Custom range (MySQL DATETIME string o YYYY-MM-DD)
   startDate?: string;
   endDate?: string;
 
   order?: "asc" | "desc";
   metrics?: string[];
 
-  // “Tiempo real”
-  refreshIntervalMs?: number; // ej 15000
-  limit?: number; // ej 5000
+  refreshIntervalMs?: number;
+  limit?: number;
 };
 
 type ApiResponse = {
@@ -39,6 +37,8 @@ type ApiResponse = {
   columns: string[];
   data: Array<Record<string, any>>;
   dateColumn: string | null;
+  hasTs?: boolean; // del backend corregido
+  order?: string; // "asc" | "desc" opcional
 };
 
 const fetcher = async <T,>(url: string): Promise<T> => {
@@ -74,6 +74,23 @@ function calcPresetRange(preset: RangePreset) {
   if (preset === "1y") start.setFullYear(end.getFullYear() - 1);
 
   return { startDate: toMysqlDateTime(start), endDate: toMysqlDateTime(end) };
+}
+
+function safeToIsoString(value: any): string {
+  if (!value) return "";
+  if (value instanceof Date) return value.toISOString();
+
+  // Si viene como número o string numérico epoch:
+  if (typeof value === "number") return new Date(value).toISOString();
+  if (typeof value === "string") {
+    const s = value.trim();
+    // epoch string
+    if (/^\d{13}$/.test(s)) return new Date(Number(s)).toISOString();
+    // si ya parece ISO o datetime, lo devolvemos tal cual (para no romper)
+    return s;
+  }
+
+  return String(value);
 }
 
 export function useSensorTimeSeries({
@@ -125,17 +142,14 @@ export function useSensorTimeSeries({
 
     const dateCol = resp.dateColumn || "datetime";
 
-    return resp.data
+    const mapped = resp.data
       .map((row) => {
-        const d = row[dateCol];
-        const dateStr =
-          d instanceof Date
-            ? d.toISOString()
-            : typeof d === "string"
-            ? d
-            : d
-            ? String(d)
-            : "";
+        // ✅ preferimos ts si viene del backend
+        const tsRaw = row.ts;
+        const ts = typeof tsRaw === "number" ? tsRaw : Number(tsRaw);
+        const hasValidTs = Number.isFinite(ts) && ts > 0;
+
+        const dateStr = hasValidTs ? new Date(ts).toISOString() : safeToIsoString(row[dateCol]);
 
         const temperature = toNumberOrNull(row.temperature);
         const humidity = toNumberOrNull(row.humidity);
@@ -143,14 +157,23 @@ export function useSensorTimeSeries({
 
         return {
           date: dateStr,
+          ts: hasValidTs ? ts : undefined,
           temperature,
           humidity,
           soilMoisture: humidity,
           conductivity,
         };
       })
-      .filter((p) => !!p.date)
-      .reverse(); // porque el endpoint suele venir DESC; esto lo deja consistente si te llega desc
+      .filter((p) => !!p.date || (p.ts && Number.isFinite(p.ts)));
+
+    // ✅ Orden final SIEMPRE: antiguo -> reciente
+    mapped.sort((a, b) => {
+      const ax = a.ts ?? Date.parse(a.date);
+      const bx = b.ts ?? Date.parse(b.date);
+      return ax - bx;
+    });
+
+    return mapped;
   }, [resp]);
 
   return {

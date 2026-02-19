@@ -95,7 +95,9 @@ export function calculateChillHours(
   temperatures: number[],
   sampleMinutes: number = 10
 ): number {
-  const chillSamples = temperatures.filter((temp) => temp >= 0 && temp <= 7.2).length;
+  const chillSamples = temperatures.filter(
+    (temp) => Number.isFinite(temp) && temp >= 0 && temp <= 7.2
+  ).length;
   const hoursPerSample = sampleMinutes / 60;
   const chillHours = chillSamples * hoursPerSample;
   return Math.round(chillHours * 10) / 10; // 1 decimal
@@ -144,18 +146,25 @@ export function calculateUtahChillUnits(
 
 /**
  * Calculate GDD (Growing Degree Days)
- * Base temperature: 7°C (as requested).
+ * Temperatura base por defecto: 7.2°C (según criterios agronómicos del cliente).
+ *
+ * Fórmula diaria típica:
+ *   GDD = max(0, ((Tmin + Tmax)/2) - Tbase)
  */
 export function calculateGDD(
   minTemps: number[],
   maxTemps: number[],
-  baseTemp: number = 7
+  baseTemp: number = 7.2
 ): number {
   let totalGDD = 0;
 
   const n = Math.min(minTemps.length, maxTemps.length);
   for (let i = 0; i < n; i++) {
-    const avgTemp = (minTemps[i] + maxTemps[i]) / 2;
+    const tmin = Number(minTemps[i]);
+    const tmax = Number(maxTemps[i]);
+    if (!Number.isFinite(tmin) || !Number.isFinite(tmax)) continue;
+
+    const avgTemp = (tmin + tmax) / 2;
     const gdd = Math.max(0, avgTemp - baseTemp);
     totalGDD += gdd;
   }

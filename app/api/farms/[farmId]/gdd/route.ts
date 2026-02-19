@@ -22,6 +22,17 @@ function pickColumn(columns: string[], candidates: string[]) {
   return null;
 }
 
+function isValidISODate(d: string) {
+  // YYYY-MM-DD
+  return /^\d{4}-\d{2}-\d{2}$/.test(d);
+}
+
+function addDaysISO(dateISO: string, days: number) {
+  const dt = new Date(`${dateISO}T00:00:00.000Z`);
+  dt.setUTCDate(dt.getUTCDate() + days);
+  return dt.toISOString().split("T")[0];
+}
+
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ farmId: string }> }
@@ -34,10 +45,17 @@ export async function GET(
 
   const sensorId = searchParams.get("sensor") || undefined;
 
-  // ✅ SIEMPRE base 7 por defecto (y si viene param, lo respetamos)
-  const baseTemp = searchParams.get("baseTemp")
-    ? Number(searchParams.get("baseTemp"))
-    : 7;
+  // ✅ Base por defecto: 7.2 ºC (según email)
+  //    Si viene por query, lo respetamos.
+  const baseTempRaw = searchParams.get("baseTemp");
+  const baseTemp = baseTempRaw !== null ? Number(baseTempRaw) : 7.2;
+
+  if (!Number.isFinite(baseTemp)) {
+    return NextResponse.json(
+      { error: "Parámetro baseTemp inválido", baseTemp: baseTempRaw },
+      { status: 400 }
+    );
+  }
 
   const { farmId } = await params;
   if (!farms.includes(farmId as any)) {
@@ -47,9 +65,42 @@ export async function GET(
     );
   }
 
-  const period = getGDDPeriod(year);
-  const startDate = period.start.toISOString().split("T")[0];
-  const endDate = period.end.toISOString().split("T")[0];
+  /**
+   * ✅ Soporte de rango:
+   * - por defecto: getGDDPeriod(year)
+   * - custom: ?range=custom&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+   *   Importante: endDate inclusivo -> usamos endExclusive = endDate + 1 día
+   */
+  const range = searchParams.get("range") || "campaign";
+
+  let startDate: string;
+  let endDate: string;
+
+  if (range === "custom") {
+    const start = searchParams.get("startDate");
+    const end = searchParams.get("endDate");
+
+    if (!start || !end || !isValidISODate(start) || !isValidISODate(end)) {
+      return NextResponse.json(
+        {
+          error:
+            "Rango custom inválido. Usa ?range=custom&startDate=YYYY-MM-DD&endDate=YYYY-MM-DD",
+          received: { startDate: start, endDate: end },
+        },
+        { status: 400 }
+      );
+    }
+
+    startDate = start;
+    endDate = end;
+  } else {
+    const period = getGDDPeriod(year);
+    startDate = period.start.toISOString().split("T")[0];
+    endDate = period.end.toISOString().split("T")[0];
+  }
+
+  // ✅ endDate inclusivo: calculamos endExclusive = endDate + 1 día
+  const endExclusive = addDaysISO(endDate, 1);
 
   let connection: any;
 
@@ -61,45 +112,58 @@ export async function GET(
     connection = await getConnection(farmId as FarmName);
 
     const perSensorSeries: Array<Array<{ date: string; daily: number }>> = [];
-    const results: Array<{ sensor: string; gdd: number; daysWithData: number }> = [];
+    const results: Array<{ sensor: string; gdd: number; daysWithData: number }> =
+      [];
 
     for (const sensor of sensors) {
       try {
         const [cols] = await connection.query(
           `SHOW COLUMNS FROM ${escapeId(sensor)}`
         );
-        const columnNames = (cols as Array<{ Field: string }>).map((c) => c.Field);
+        const columnNames = (cols as Array<{ Field: string }>).map(
+          (c) => c.Field
+        );
 
         const tempColumn =
           pickColumn(columnNames, ["temperature", "temperatura", "temp"]) || null;
 
         const dateColumn =
-          pickColumn(columnNames, ["datetime", "fecha", "timestamp", "date", "time"]) ||
-          null;
+          pickColumn(columnNames, [
+            "datetime",
+            "fecha",
+            "timestamp",
+            "date",
+            "time",
+          ]) || null;
 
         if (!tempColumn || !dateColumn) continue;
 
-        // GDD diario = max(0, ((tmin+tmax)/2 - base))
+        /**
+         * ✅ FIX CLAVE:
+         * En vez de BETWEEN startDate AND endDate (que suele excluir horas del último día),
+         * usamos [startDate 00:00, endExclusive 00:00)
+         */
         const [rows] = await connection.query(
           `
           SELECT DATE(${escapeId(dateColumn)}) AS day,
                  MIN(${escapeId(tempColumn)}) AS tmin,
                  MAX(${escapeId(tempColumn)}) AS tmax
           FROM ${escapeId(sensor)}
-          WHERE ${escapeId(dateColumn)} BETWEEN ? AND ?
+          WHERE ${escapeId(dateColumn)} >= ?
+            AND ${escapeId(dateColumn)} < ?
           GROUP BY DATE(${escapeId(dateColumn)})
           ORDER BY day ASC
         `,
-          [startDate, endDate]
+          [startDate, endExclusive]
         );
 
-        const daily = (rows as Array<{ day: string; tmin: number; tmax: number }>).map(
-          (r) => {
-            const avg = (Number(r.tmin) + Number(r.tmax)) / 2;
-            const d = Math.max(0, avg - baseTemp);
-            return { date: String(r.day), daily: Math.round(d * 10) / 10 };
-          }
-        );
+        const daily = (
+          rows as Array<{ day: string; tmin: number; tmax: number }>
+        ).map((r) => {
+          const avg = (Number(r.tmin) + Number(r.tmax)) / 2;
+          const d = Math.max(0, avg - baseTemp);
+          return { date: String(r.day), daily: Math.round(d * 10) / 10 };
+        });
 
         perSensorSeries.push(daily);
 
@@ -114,7 +178,7 @@ export async function GET(
       }
     }
 
-    // merge series (media diaria)
+    // merge series (media diaria entre sensores)
     const merged = new Map<string, { sum: number; count: number }>();
 
     for (const serie of perSensorSeries) {
@@ -140,6 +204,7 @@ export async function GET(
     });
 
     const totalGDD = series.length ? series[series.length - 1].cumulative : 0;
+
     const avgGDD =
       results.length > 0
         ? Math.round(
@@ -147,13 +212,33 @@ export async function GET(
           ) / 10
         : 0;
 
+    // ✅ thresholds pedidos
+    const thresholds = { gdd450: 450, gdd900: 900 };
+
+    // ✅ milestones: primera fecha en la que cumulative >= threshold
+    const hit450 = series.find((p) => p.cumulative >= thresholds.gdd450) || null;
+    const hit900 = series.find((p) => p.cumulative >= thresholds.gdd900) || null;
+
+    const milestones = {
+      gdd450: hit450 ? { reached: true, date: hit450.date } : { reached: false, date: null },
+      gdd900: hit900 ? { reached: true, date: hit900.date } : { reached: false, date: null },
+    };
+
+    // ✅ today: mejor “último punto disponible” que buscar el día real (suele no existir)
     const todayDate = new Date().toISOString().split("T")[0];
-    const todayPoint = series.find((x) => x.date === todayDate);
+    const todayPoint =
+      series.find((x) => x.date === todayDate) || (series.length ? series[series.length - 1] : null);
+
+    const window450_900 =
+      totalGDD >= thresholds.gdd450 && totalGDD < thresholds.gdd900;
 
     return NextResponse.json({
       farmId,
       period: { start: startDate, end: endDate },
+      range,
       baseTemp,
+      thresholds,
+      milestones,
       sensors: results.map((r) => ({
         sensor: r.sensor,
         gdd: r.gdd,
@@ -161,11 +246,20 @@ export async function GET(
         daysWithData: r.daysWithData,
       })),
       series: { daily: series },
-      today: todayPoint ? { date: todayPoint.date, gdd: todayPoint.daily } : null,
+      today: todayPoint
+        ? {
+            date: todayPoint.date,
+            gdd: todayPoint.daily,
+            cumulative: todayPoint.cumulative,
+          }
+        : null,
       summary: {
         totalGDD,
         avgGDD,
         sensorCount: results.length,
+        window450_900,
+        remainingTo450: Math.max(0, Math.round((thresholds.gdd450 - totalGDD) * 10) / 10),
+        remainingTo900: Math.max(0, Math.round((thresholds.gdd900 - totalGDD) * 10) / 10),
       },
     });
   } catch (error: any) {

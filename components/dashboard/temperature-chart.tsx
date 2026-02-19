@@ -30,7 +30,14 @@ const GREEN = "#4ade80";
 const BLUE = "#60a5fa";
 const ORANGE = "#f97316";
 
-function pickTimestamp(row: AnyRow): Date | null {
+function pickEpochMs(row: AnyRow): number | null {
+  // ✅ prioridad: ts (ms) si viene del hook/backend
+  const tsRaw = row?.ts;
+  if (tsRaw !== undefined && tsRaw !== null && tsRaw !== "") {
+    const ts = typeof tsRaw === "number" ? tsRaw : Number(tsRaw);
+    if (Number.isFinite(ts) && ts > 0) return ts;
+  }
+
   const raw =
     row?.date ??
     row?.datetime ??
@@ -41,8 +48,16 @@ function pickTimestamp(row: AnyRow): Date | null {
     row?.createdAt;
 
   if (!raw) return null;
+
+  // epoch string
+  if (typeof raw === "string" && /^\d{13}$/.test(raw.trim())) {
+    const ts = Number(raw.trim());
+    if (Number.isFinite(ts) && ts > 0) return ts;
+  }
+
   const d = raw instanceof Date ? raw : new Date(raw);
-  return Number.isFinite(d.getTime()) ? d : null;
+  const t = d.getTime();
+  return Number.isFinite(t) ? t : null;
 }
 
 function pickNumber(row: AnyRow, keys: string[]): number | null {
@@ -52,6 +67,16 @@ function pickNumber(row: AnyRow, keys: string[]): number | null {
     if (Number.isFinite(n)) return n;
   }
   return null;
+}
+
+function formatTick(ts: number) {
+  // formato compacto para el eje X
+  return new Date(ts).toLocaleString("es-ES", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 export function TemperatureChart({
@@ -70,23 +95,34 @@ export function TemperatureChart({
 
   const formattedData = useMemo(() => {
     const rows = Array.isArray(data) ? data : [];
-    return rows
+
+    const mapped = rows
       .map((row) => {
-        const dt = pickTimestamp(row);
+        const ts = pickEpochMs(row);
+        if (!ts) return null;
+
         const temperature = pickNumber(row, ["temperature", "temp", "temperatura"]);
         const humidity = pickNumber(row, ["humidity", "hum", "humedad"]);
 
-        if (!dt) return null; // 👈 si no hay fecha válida, fuera
         return {
-          // guardo ISO para tooltips
-          _ts: dt.toISOString(),
-          // para el eje X uso hora/día según densidad
-          date: dt.toLocaleString("es-ES", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }),
+          ts, // ✅ eje X
+          // ISO solo para tooltip (si quieres)
+          _iso: new Date(ts).toISOString(),
           temperature,
           humidity,
         };
       })
-      .filter(Boolean) as Array<{ _ts: string; date: string; temperature: number | null; humidity: number | null }>;
+      .filter(Boolean) as Array<{
+      ts: number;
+      _iso: string;
+      temperature: number | null;
+      humidity: number | null;
+    }>;
+
+    // ✅ SIEMPRE: antiguo -> reciente
+    mapped.sort((a, b) => a.ts - b.ts);
+
+    return mapped;
   }, [data]);
 
   return (
@@ -132,7 +168,10 @@ export function TemperatureChart({
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
 
                 <XAxis
-                  dataKey="date"
+                  dataKey="ts"
+                  type="number"
+                  domain={["dataMin", "dataMax"]}
+                  tickFormatter={(v) => formatTick(Number(v))}
                   tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }}
                   tickLine={false}
                   axisLine={false}
@@ -150,8 +189,8 @@ export function TemperatureChart({
                     <ChartTooltipContent
                       labelFormatter={(_, payload) => {
                         const p = payload?.[0]?.payload;
-                        if (!p?._ts) return "";
-                        return new Date(p._ts).toLocaleString("es-ES");
+                        if (!p?.ts) return "";
+                        return new Date(p.ts).toLocaleString("es-ES");
                       }}
                     />
                   }
@@ -164,23 +203,26 @@ export function TemperatureChart({
                   label={{ value: "Helada", fill: ORANGE, fontSize: 10 }}
                 />
 
+                {/* ✅ tipo "stepAfter" para que sea escalera como Nespra */}
                 <Area
-                  type="monotone"
+                  type="stepAfter"
                   dataKey="temperature"
                   stroke={GREEN}
                   strokeWidth={2}
                   fill="url(#tempGradient)"
                   name="Temperatura (°C)"
                   connectNulls
+                  isAnimationActive={false}
                 />
                 <Area
-                  type="monotone"
+                  type="stepAfter"
                   dataKey="humidity"
                   stroke={BLUE}
                   strokeWidth={2}
                   fill="url(#humGradient)"
                   name="Humedad (%)"
                   connectNulls
+                  isAnimationActive={false}
                 />
               </AreaChart>
             </ResponsiveContainer>
