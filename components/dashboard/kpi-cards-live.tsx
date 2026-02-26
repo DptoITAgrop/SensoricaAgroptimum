@@ -213,19 +213,20 @@ export function KPICardsLive({ farmId, selectedSensor }: KPICardsLiveProps) {
     return isSoil && !allowed;
   }, [isSingleSensor, chillSensorRow]);
 
-  const chillHoursValue = useMemo(() => {
-    if (isSingleSensor) {
-      if (!chillSensorRow) return null;
+const chillHoursValue = useMemo(() => {
+  if (isSingleSensor) {
+    if (!chillSensorRow) return null;
 
-      if (chillSensorRow.skippedReason) return null;
-      if (selectedIsSoilForHF) return null;
+    if (chillSensorRow.skippedReason) return null;
+    if (selectedIsSoilForHF) return null;
 
-      return toNumberOrNull(chillSensorRow.chillHours);
-    }
+    // ✅ Sensor específico: sus HF
+    return toNumberOrNull(chillSensorRow.chillHours);
+  }
 
-    // En modo ALL, el KPI principal muestra TOTAL FINCA.
-    return toNumberOrNull(chillData?.summary?.totalChillHours);
-  }, [isSingleSensor, chillSensorRow, selectedIsSoilForHF, chillData]);
+  // ✅ TODOS: media de sensores válidos (ambientales + excepciones permitidas)
+  return toNumberOrNull(chillData?.summary?.avgChillHours);
+}, [isSingleSensor, chillSensorRow, selectedIsSoilForHF, chillData]);
 
   const chillProgress =
     chillHoursValue !== null && chillHoursTarget > 0
