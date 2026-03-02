@@ -28,17 +28,33 @@ function fmt0(v: any): string {
 }
 
 export function KPICards({ agronomyData, latestReading }: KPICardsProps) {
-  const chillHours = toNum((agronomyData as any)?.chillHours)
+  // ---- HF ----
+  const chillHoursTotal = toNum((agronomyData as any)?.chillHours)
+  const chillHoursAvg = toNum((agronomyData as any)?.chillHoursAvg) // ✅ NUEVO (si lo aportas desde backend)
   const chillTarget = toNum((agronomyData as any)?.chillHoursTarget)
 
+  // Si existe la media -> mostramos media. Si no -> fallback a total (lo actual).
+  const useAverageHF = chillHoursAvg !== null
+  const chillHoursDisplay = useAverageHF ? chillHoursAvg : chillHoursTotal
+
   const chillProgress =
-    chillHours !== null && chillTarget !== null && chillTarget > 0
-      ? (chillHours / chillTarget) * 100
+    chillHoursDisplay !== null && chillTarget !== null && chillTarget > 0
+      ? (chillHoursDisplay / chillTarget) * 100
       : null
 
-  const gdd = toNum((agronomyData as any)?.gdd)
+  // ---- GDD ----
+  const gddTotal = toNum((agronomyData as any)?.gdd)
+  const gddAvg = toNum((agronomyData as any)?.gddAvg) // ✅ opcional si lo quieres igual que HF
   const gddBase = toNum((agronomyData as any)?.gddBase)
 
+  // Si algún día quieres “media finca” también en GDD, puedes usar lo mismo.
+  const useAverageGDD = gddAvg !== null
+  const gddDisplay = useAverageGDD ? gddAvg : gddTotal
+
+  // “GDD hoy” si te lo da el backend (mejor que hardcode)
+  const gddToday = toNum((agronomyData as any)?.gddToday)
+
+  // ---- Tiempo real ----
   const temperature = toNum((latestReading as any)?.temperature)
   const humidity = toNum((latestReading as any)?.humidity)
   const soilMoisture = toNum((latestReading as any)?.soilMoisture)
@@ -58,16 +74,21 @@ export function KPICards({ agronomyData, latestReading }: KPICardsProps) {
               </p>
 
               <p className="text-3xl font-bold text-foreground mt-1">
-                {chillHours === null ? '—' : fmt1(chillHours)}
+                {chillHoursDisplay === null ? '—' : fmt1(chillHoursDisplay)}
               </p>
 
               <p className="text-xs text-muted-foreground mt-1">
                 {chillTarget !== null ? (
                   <>
-                    de {fmt0(chillTarget)} objetivo · <span className="opacity-80">Campaña (1 Nov–1 Mar)</span>
+                    de {fmt0(chillTarget)} objetivo ·{' '}
+                    <span className="opacity-80">
+                      {useAverageHF ? 'Media finca' : 'Total finca'} (1 Nov–1 Mar)
+                    </span>
                   </>
                 ) : (
-                  <span className="opacity-80">Campaña (1 Nov–1 Mar)</span>
+                  <span className="opacity-80">
+                    {useAverageHF ? 'Media finca' : 'Total finca'} (1 Nov–1 Mar)
+                  </span>
                 )}
               </p>
             </div>
@@ -100,20 +121,34 @@ export function KPICards({ agronomyData, latestReading }: KPICardsProps) {
               <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">
                 GDD Acumulados
               </p>
-              <p className="text-3xl font-bold text-foreground mt-1">{gdd === null ? '—' : fmt1(gdd)}</p>
+
+              <p className="text-3xl font-bold text-foreground mt-1">
+                {gddDisplay === null ? '—' : fmt1(gddDisplay)}
+              </p>
+
               <p className="text-xs text-muted-foreground mt-1">
-                {gddBase === null ? 'Base: —' : `Base: ${fmt0(gddBase)}°C`}
+                {gddBase === null ? 'Base: —' : `Base: ${fmt1(gddBase)}°C`}
+                {useAverageGDD ? <span className="opacity-80"> · Media finca</span> : null}
               </p>
             </div>
+
             <div className="p-2 rounded-lg bg-primary/20">
               <Leaf className="h-5 w-5 text-primary" />
             </div>
           </div>
 
-          <div className="mt-3 flex items-center gap-2">
-            <TrendingUp className="h-4 w-4 text-primary" />
-            <span className="text-xs text-primary font-medium">+12 GDD hoy</span>
-          </div>
+          {/* ✅ sin hardcode: solo si existe gddToday */}
+          {gddToday !== null ? (
+            <div className="mt-3 flex items-center gap-2">
+              <TrendingUp className="h-4 w-4 text-primary" />
+              <span className="text-xs text-primary font-medium">+{fmt1(gddToday)} GDD hoy</span>
+            </div>
+          ) : (
+            <div className="mt-3 flex items-center gap-2">
+              <TrendingUp className="h-4 w-4 text-primary" />
+              <span className="text-xs text-primary font-medium">Período vegetativo</span>
+            </div>
+          )}
         </CardContent>
       </Card>
 

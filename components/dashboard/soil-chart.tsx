@@ -2,7 +2,6 @@
 
 import { useMemo } from "react";
 import {
-  Bar,
   ComposedChart,
   Line,
   XAxis,
@@ -24,11 +23,15 @@ interface SoilChartProps {
   rangeLabel?: string;
   isLoading?: boolean;
   error?: any;
+
+  cc?: number | string | null;
+  pmp?: number | string | null;
 }
 
 const TEAL = "#2dd4bf";
 const AMBER = "#fbbf24";
 const RED = "#ef4444";
+const GREEN = "#22c55e";
 
 type AnyRow = Record<string, any>;
 
@@ -49,25 +52,15 @@ function pickTimestamp(row: AnyRow): Date | null {
 }
 
 function toNum(v: any): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "string" && !v.trim()) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
 
-/**
- * Normaliza conductividad a dS/m de forma segura:
- * - Si viene muy alta (ej 15040) asumimos µS/cm -> 15.04 dS/m (dividir entre 1000)
- * - Si viene en rango humano (0..200) asumimos ya mS/cm ~ dS/m y lo dejamos
- */
-function normalizeConductivityToDSm(raw: any): number | null {
-  const v = toNum(raw);
-  if (v === null) return null;
-
-  // Heurística bastante típica con sensores:
-  // 10000-50000 = µS/cm (10-50 dS/m)
-  if (v > 5000) return Math.round((v / 1000) * 100) / 100;
-
-  // ya “pequeño”: lo tomamos como dS/m (o mS/cm equivalente)
-  return Math.round(v * 100) / 100;
+function safeLabel(v: number | null | undefined) {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "";
+  return Math.abs(v - Math.round(v)) > 1e-9 ? v.toFixed(2) : String(v);
 }
 
 export function SoilChart({
@@ -75,11 +68,16 @@ export function SoilChart({
   rangeLabel = "Últimos 30 días",
   isLoading,
   error,
+  cc = null,
+  pmp = null,
 }: SoilChartProps) {
+  const ccN = useMemo(() => toNum(cc), [cc]);
+  const pmpN = useMemo(() => toNum(pmp), [pmp]);
+
   const chartConfig = useMemo(
     () => ({
-      soilMoisture: { label: "Humedad Suelo", color: TEAL },
-      conductivity: { label: "Conductividad", color: AMBER },
+      soilMoisture: { label: "Humedad suelo (%)", color: TEAL },
+      conductivity: { label: "CE (µS/cm)", color: AMBER },
     }),
     []
   );
@@ -91,7 +89,6 @@ export function SoilChart({
         const dt = pickTimestamp(d);
         if (!dt) return null;
 
-        // Humedad suelo: en tu BD es "humidity" pero tu mock usa "soilMoisture"
         const soilMoisture =
           toNum(d.soilMoisture) ??
           toNum(d.soil_moisture) ??
@@ -100,13 +97,10 @@ export function SoilChart({
           toNum(d.moisture);
 
         const conductivity =
-          normalizeConductivityToDSm(d.conductivity) ??
-          normalizeConductivityToDSm(d.ec) ??
-          normalizeConductivityToDSm(d.conductividad);
+          toNum(d.conductivity) ?? toNum(d.ec) ?? toNum(d.conductividad);
 
         return {
           _ts: dt.toISOString(),
-          // para que no salga Invalid Date y se vea bien en rangos cortos/largos:
           date: dt.toLocaleString("es-ES", {
             day: "2-digit",
             month: "short",
@@ -125,16 +119,41 @@ export function SoilChart({
     }>;
   }, [data]);
 
-  // Para que el eje derecho no se vaya a Marte:
-  const conductivityMax = useMemo(() => {
+  const rightMax = useMemo(() => {
     const vals = formattedData
       .map((r) => r.conductivity)
       .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
-    if (vals.length === 0) return 10;
+    if (!vals.length) return 100;
     const max = Math.max(...vals);
-    // margen visual
-    return Math.max(5, Math.ceil(max * 1.2));
+    return Math.max(100, Math.ceil(max * 1.15));
   }, [formattedData]);
+
+  const leftDomain = useMemo(() => {
+    const vals = formattedData
+      .map((r) => r.soilMoisture)
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+
+    const refVals = [ccN, pmpN].filter(
+      (v): v is number => typeof v === "number" && Number.isFinite(v)
+    );
+
+    const all = [...vals, ...refVals];
+    if (!all.length) return [0, 100] as [number, number];
+
+    const min = Math.min(...all);
+    const max = Math.max(...all);
+
+    const span = Math.max(1, max - min);
+    const pad = span * 0.12;
+
+    const lo = Math.max(0, Math.floor((min - pad) * 100) / 100);
+    const hi = Math.ceil((max + pad) * 100) / 100;
+
+    return [lo, hi] as [number, number];
+  }, [formattedData, ccN, pmpN]);
+
+  const showCC = typeof ccN === "number" && Number.isFinite(ccN);
+  const showPMP = typeof pmpN === "number" && Number.isFinite(pmpN);
 
   return (
     <Card className="bg-card border-border">
@@ -163,7 +182,7 @@ export function SoilChart({
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart
                 data={formattedData}
-                margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                margin={{ top: 12, right: 18, left: -10, bottom: 0 }}
               >
                 <CartesianGrid
                   strokeDasharray="3 3"
@@ -178,12 +197,13 @@ export function SoilChart({
                   minTickGap={18}
                 />
 
+                {/* ✅ IMPORTANTE: yAxisId="left" */}
                 <YAxis
                   yAxisId="left"
                   tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }}
                   tickLine={false}
                   axisLine={false}
-                  domain={[0, 100]}
+                  domain={leftDomain}
                 />
 
                 <YAxis
@@ -192,7 +212,7 @@ export function SoilChart({
                   tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }}
                   tickLine={false}
                   axisLine={false}
-                  domain={[0, conductivityMax]}
+                  domain={[0, rightMax]}
                 />
 
                 <ChartTooltip
@@ -207,22 +227,16 @@ export function SoilChart({
                   }
                 />
 
-                {/* Ejemplo de umbral (ajústalo a tu criterio): 4 dS/m */}
-                <ReferenceLine
-                  yAxisId="right"
-                  y={4}
-                  stroke={RED}
-                  strokeDasharray="5 5"
-                  label={{ value: "Alerta", fill: RED, fontSize: 10 }}
-                />
-
-                <Bar
+                {/* ✅ Primero las series */}
+                <Line
                   yAxisId="left"
+                  type="monotone"
                   dataKey="soilMoisture"
-                  fill={TEAL}
-                  opacity={0.7}
-                  radius={[4, 4, 0, 0]}
-                  name="Humedad Suelo (%)"
+                  stroke={TEAL}
+                  strokeWidth={2}
+                  dot={false}
+                  connectNulls
+                  name="Humedad suelo (%)"
                 />
 
                 <Line
@@ -233,22 +247,67 @@ export function SoilChart({
                   strokeWidth={2}
                   dot={false}
                   connectNulls
-                  name="Conductividad (dS/m)"
+                  name="CE (µS/cm)"
                 />
+
+                {/* ✅ Y luego las líneas, en FRONT */}
+                {showCC && (
+                  <ReferenceLine
+                    yAxisId="left"
+                    y={ccN as number}
+                    stroke={GREEN}
+                    strokeWidth={3}
+                    strokeDasharray="6 4"
+                    ifOverflow="extendDomain"
+                    isFront
+                  />
+                )}
+
+                {showPMP && (
+                  <ReferenceLine
+                    yAxisId="left"
+                    y={pmpN as number}
+                    stroke={RED}
+                    strokeWidth={3}
+                    strokeDasharray="6 4"
+                    ifOverflow="extendDomain"
+                    isFront
+                  />
+                )}
               </ComposedChart>
             </ResponsiveContainer>
           </ChartContainer>
         )}
 
-        <div className="flex items-center justify-center gap-6 mt-2">
+        {/* Leyenda */}
+        <div className="flex items-center justify-center gap-6 mt-2 flex-wrap">
           <div className="flex items-center gap-2">
-            <div className="w-3 h-3 rounded" style={{ backgroundColor: TEAL }} />
-            <span className="text-xs text-muted-foreground">Humedad Suelo</span>
+            <div className="w-3 h-0.5" style={{ backgroundColor: TEAL }} />
+            <span className="text-xs text-muted-foreground">Humedad suelo (%)</span>
           </div>
+
           <div className="flex items-center gap-2">
             <div className="w-3 h-0.5" style={{ backgroundColor: AMBER }} />
-            <span className="text-xs text-muted-foreground">Conductividad (dS/m)</span>
+            <span className="text-xs text-muted-foreground">CE (µS/cm)</span>
           </div>
+
+          {showCC && (
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-0.5" style={{ backgroundColor: GREEN }} />
+              <span className="text-xs text-muted-foreground">
+                CC ({safeLabel(ccN)})
+              </span>
+            </div>
+          )}
+
+          {showPMP && (
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-0.5" style={{ backgroundColor: RED }} />
+              <span className="text-xs text-muted-foreground">
+                PMP ({safeLabel(pmpN)})
+              </span>
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>

@@ -45,6 +45,24 @@ interface UserSession {
   allowedFarms: string[] | "all";
 }
 
+type SoilIrrigationParams = {
+  id: number;
+  farm_name: string;
+  sensor_table: string;
+
+  cc: number | null;
+  pmp: number | null;
+  adp: number | null;
+
+  pct_inicio: number | null;
+  pct_fin: number | null;
+
+  umbral_inicio: number | null;
+  umbral_fin: number | null;
+
+  profundidad_sensor_m: number | null;
+};
+
 function rangeLabel(p: RangePreset) {
   if (p === "7d") return "Última semana";
   if (p === "30d") return "Último mes";
@@ -52,16 +70,41 @@ function rangeLabel(p: RangePreset) {
   return "Último año";
 }
 
+// ✅ mismo storageKey que en agronomy-chart.tsx
+function storageKey(farmId: string, selectedSensor?: string) {
+  return `agro:gddStart:${farmId}:${selectedSensor || "all"}`;
+}
+
+function isValidISODate(d: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(d);
+}
+
+function isSoilSensor(sensorId: string) {
+  return sensorId.includes("_suelo_") || sensorId.includes("suelo");
+}
+
 export default function Dashboard() {
   const router = useRouter();
+
   const [user, setUser] = useState<UserSession | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+
   const [selectedFarmId, setSelectedFarmId] = useState("");
   const [selectedSensor, setSelectedSensor] = useState("all");
   const [activeTab, setActiveTab] = useState("overview");
 
   // ✅ filtro temporal para gráficas
   const [rangePreset, setRangePreset] = useState<RangePreset>("30d");
+
+  // ✅ gddStartDate (plena floración) leído desde localStorage
+  const [gddStartDate, setGddStartDate] = useState<string | null>(null);
+
+  // ✅ parámetros riego por sensor (SOLO CC/PMP, sin romper el chart si falla)
+  const [soilParams, setSoilParams] = useState<SoilIrrigationParams | null>(
+    null
+  );
+  const [soilParamsLoading, setSoilParamsLoading] = useState(false);
+  const [soilParamsError, setSoilParamsError] = useState<any>(null);
 
   // Cargar sesión del usuario
   useEffect(() => {
@@ -93,6 +136,25 @@ export default function Dashboard() {
     loadSession();
   }, [router]);
 
+  // ✅ Leer gddStartDate desde localStorage cada vez que cambie finca/sensor
+  useEffect(() => {
+    if (!selectedFarmId) return;
+
+    const key = storageKey(
+      selectedFarmId,
+      selectedSensor && selectedSensor !== "all" ? selectedSensor : "all"
+    );
+
+    const saved =
+      typeof window !== "undefined" ? window.localStorage.getItem(key) : null;
+
+    if (saved && isValidISODate(saved)) {
+      setGddStartDate(saved);
+    } else {
+      setGddStartDate(null);
+    }
+  }, [selectedFarmId, selectedSensor]);
+
   // Filtrar fincas según permisos del usuario
   const userFarms = useMemo(() => {
     if (!user) return [];
@@ -116,7 +178,10 @@ export default function Dashboard() {
     [selectedFarmId]
   );
 
-  const activeAlertCount = alerts.filter((a) => !a.acknowledged).length;
+  const activeAlertCount = useMemo(
+    () => alerts.filter((a) => !a.acknowledged).length,
+    []
+  );
 
   // ✅ sensor real para gráficas: si "all", usamos undefined
   const sensorForCharts = useMemo(() => {
@@ -145,20 +210,109 @@ export default function Dashboard() {
     return timeSeriesData as any;
   }, [timeSeriesData]);
 
+  // ✅ data enriquecida con gddStartDate para que PhenologyPanel pueda llamar al endpoint
+  const agronomyForPanels = useMemo(() => {
+    if (!gddStartDate) return fincaAgronomy as any;
+    return { ...(fincaAgronomy as any), gddStartDate };
+  }, [fincaAgronomy, gddStartDate]);
+
+  // ✅ cargar parámetros CC/PMP del sensor seleccionado (si es suelo)
+  // Importante: si falla, NO rompemos el chart (solo dejamos CC/PMP a null)
+  useEffect(() => {
+    const farmId = selectedFarmId;
+    const sensorId = sensorForCharts;
+
+    setSoilParams(null);
+    setSoilParamsError(null);
+
+    if (!farmId || !sensorId) return;
+    if (!isSoilSensor(sensorId)) return;
+
+    let cancelled = false;
+
+    async function loadSoilParams() {
+      setSoilParamsLoading(true);
+      try {
+        const url = `/api/farms/${encodeURIComponent(
+          farmId
+        )}/soil-irrigation-params?sensor=${encodeURIComponent(sensorId)}`;
+
+        const res = await fetch(url, { cache: "no-store" });
+
+        // 👇 si no hay params (404) o falla (500/504), NO lanzamos error hacia UI
+        // solo dejamos soilParams en null y seguimos.
+        if (!res.ok) {
+          const txt = await res.text().catch(() => "");
+          console.warn(
+            `[soilParams] no disponibles (${res.status}):`,
+            txt || res.statusText
+          );
+          if (!cancelled) {
+            setSoilParams(null);
+            setSoilParamsError(null); // no romper UI
+          }
+          return;
+        }
+
+        const json = await res.json();
+
+        const payload =
+          (json &&
+          typeof json === "object" &&
+          "data" in json
+            ? (json as any).data
+            : json) ?? null;
+
+        const row = Array.isArray(payload) ? payload[0] ?? null : payload;
+
+        if (!cancelled) setSoilParams(row ?? null);
+      } catch (e: any) {
+        console.warn("[soilParams] error (ignorado para UI):", e);
+        if (!cancelled) {
+          setSoilParams(null);
+          setSoilParamsError(null); // no romper UI
+        }
+      } finally {
+        if (!cancelled) setSoilParamsLoading(false);
+      }
+    }
+
+    loadSoilParams();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFarmId, sensorForCharts]);
+
   const handleRefresh = useCallback(() => {
     if (!selectedFarmId) return;
 
-    // KPIs
     mutate(`/api/farms/${selectedFarmId}/chill-hours`);
     mutate(`/api/farms/${selectedFarmId}/gdd`);
     mutate(`/api/farms/${selectedFarmId}/sensors`);
 
-    // Gráficas (data del sensor)
+    if (sensorForCharts && isSoilSensor(sensorForCharts)) {
+      mutate(
+        `/api/farms/${encodeURIComponent(
+          selectedFarmId
+        )}/soil-irrigation-params?sensor=${encodeURIComponent(sensorForCharts)}`
+      );
+    }
+
+    mutate((key: any) => {
+      if (typeof key !== "string") return false;
+      return key.includes(
+        `/api/farms/${encodeURIComponent(selectedFarmId)}/phenology/milestones`
+      );
+    });
+
     if (sensorForCharts) {
       mutate(
         (key: any) =>
           typeof key === "string" &&
-          key.includes(`/api/farms/${encodeURIComponent(selectedFarmId)}/sensors/`) &&
+          key.includes(
+            `/api/farms/${encodeURIComponent(selectedFarmId)}/sensors/`
+          ) &&
           key.includes("/data")
       );
     }
@@ -171,6 +325,9 @@ export default function Dashboard() {
     setSelectedFarmId(farmId);
     setSelectedSensor("all");
 
+    setSoilParams(null);
+    setSoilParamsError(null);
+
     mutate(`/api/farms/${farmId}/sensors`);
     mutate(`/api/farms/${farmId}/chill-hours`);
     mutate(`/api/farms/${farmId}/gdd`);
@@ -179,18 +336,37 @@ export default function Dashboard() {
   const handleSensorChange = (sensorId: string) => {
     setSelectedSensor(sensorId);
 
+    setSoilParams(null);
+    setSoilParamsError(null);
+
     if (!selectedFarmId) return;
+
     mutate(`/api/farms/${selectedFarmId}/chill-hours`);
     mutate(`/api/farms/${selectedFarmId}/gdd`);
+
+    if (sensorId !== "all" && isSoilSensor(sensorId)) {
+      mutate(
+        `/api/farms/${encodeURIComponent(
+          selectedFarmId
+        )}/soil-irrigation-params?sensor=${encodeURIComponent(sensorId)}`
+      );
+    }
+
+    mutate((key: any) => {
+      if (typeof key !== "string") return false;
+      return key.includes(
+        `/api/farms/${encodeURIComponent(selectedFarmId)}/phenology/milestones`
+      );
+    });
 
     if (sensorId !== "all") {
       mutate(
         (key: any) =>
           typeof key === "string" &&
           key.includes(
-            `/api/farms/${encodeURIComponent(selectedFarmId)}/sensors/${encodeURIComponent(
-              sensorId
-            )}/data`
+            `/api/farms/${encodeURIComponent(
+              selectedFarmId
+            )}/sensors/${encodeURIComponent(sensorId)}/data`
           )
       );
     }
@@ -205,6 +381,29 @@ export default function Dashboard() {
     }
   };
 
+  // ✅ SOLO CC/PMP (sin umbrales). Si es 0 o null, no se pinta.
+  const soilChartParams = (() => {
+    const sensorId = sensorForCharts;
+
+    if (!sensorId || !isSoilSensor(sensorId) || !soilParams) {
+      return {
+        cc: null as number | null,
+        pmp: null as number | null,
+      };
+    }
+
+    const cc =
+      typeof soilParams.cc === "number" && soilParams.cc > 0 ? soilParams.cc : null;
+
+    const pmp =
+      typeof soilParams.pmp === "number" && soilParams.pmp > 0 ? soilParams.pmp : null;
+
+    return { cc, pmp };
+  })();
+
+  // -----------------------------
+  // ✅ A PARTIR DE AQUÍ: returns
+  // -----------------------------
   if (isLoading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -216,7 +415,7 @@ export default function Dashboard() {
     );
   }
 
-  if (!user || userFarms.length === 0) return null;
+  if (!user) return null;
 
   return (
     <div className="min-h-screen bg-background">
@@ -305,7 +504,11 @@ export default function Dashboard() {
         </section>
 
         {/* Main Content Tabs */}
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
+        <Tabs
+          value={activeTab}
+          onValueChange={setActiveTab}
+          className="space-y-4"
+        >
           <TabsList className="bg-secondary">
             <TabsTrigger value="overview">Vista General</TabsTrigger>
             <TabsTrigger value="climate">Clima</TabsTrigger>
@@ -320,7 +523,9 @@ export default function Dashboard() {
                 <LeafletMap
                   selectedFarmId={selectedFarmId}
                   onFarmChange={handleFarmChange}
-                  allowedFarms={user.allowedFarms === "all" ? undefined : user.allowedFarms}
+                  allowedFarms={
+                    user.allowedFarms === "all" ? undefined : user.allowedFarms
+                  }
                 />
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -330,18 +535,28 @@ export default function Dashboard() {
                     isLoading={seriesLoading}
                     error={seriesError}
                   />
+
                   <SoilChart
                     data={timeSeriesData as any}
                     rangeLabel={rangeLabel(rangePreset)}
-                    isLoading={seriesLoading}
-                    error={seriesError}
+                    isLoading={seriesLoading} // ✅ NO bloquear por soilParamsLoading
+                    error={seriesError} // ✅ NO romper por soilParamsError
+                    cc={soilChartParams.cc}
+                    pmp={soilChartParams.pmp}
+                    umbralInicio={null}
+                    umbralFin={null}
                   />
                 </div>
               </div>
 
               <div className="space-y-6">
                 <AlertsPanel alerts={fincaAlerts} />
-                <PhenologyPanel data={fincaAgronomy} variety={selectedFinca.variety} />
+                <PhenologyPanel
+                  data={agronomyForPanels as any}
+                  variety={selectedFinca.variety}
+                  farmId={selectedFarmId}
+                  selectedSensor={selectedSensor}
+                />
               </div>
             </div>
           </TabsContent>
@@ -355,11 +570,16 @@ export default function Dashboard() {
                 isLoading={seriesLoading}
                 error={seriesError}
               />
+
               <SoilChart
                 data={timeSeriesData as any}
                 rangeLabel={rangeLabel(rangePreset)}
-                isLoading={seriesLoading}
-                error={seriesError}
+                isLoading={seriesLoading} // ✅
+                error={seriesError} // ✅
+                cc={soilChartParams.cc}
+                pmp={soilChartParams.pmp}
+                umbralInicio={null}
+                umbralFin={null}
               />
             </div>
 
@@ -388,7 +608,9 @@ export default function Dashboard() {
                           Temperatura máxima ({rangeLabel(rangePreset)})
                         </span>
                         <span className="text-sm font-medium text-foreground">
-                          {Math.max(...timeSeriesData.map((d: any) => d.temperature ?? -999)).toFixed(1)}
+                          {Math.max(
+                            ...timeSeriesData.map((d: any) => d.temperature ?? -999)
+                          ).toFixed(1)}
                           °C
                         </span>
                       </div>
@@ -398,7 +620,9 @@ export default function Dashboard() {
                           Temperatura mínima ({rangeLabel(rangePreset)})
                         </span>
                         <span className="text-sm font-medium text-foreground">
-                          {Math.min(...timeSeriesData.map((d: any) => d.temperature ?? 999)).toFixed(1)}
+                          {Math.min(
+                            ...timeSeriesData.map((d: any) => d.temperature ?? 999)
+                          ).toFixed(1)}
                           °C
                         </span>
                       </div>
@@ -434,7 +658,9 @@ export default function Dashboard() {
                       </div>
 
                       <div className="flex items-center justify-between py-3">
-                        <span className="text-sm text-muted-foreground">Registros cargados</span>
+                        <span className="text-sm text-muted-foreground">
+                          Registros cargados
+                        </span>
                         <span className="text-sm font-medium text-foreground">
                           {timeSeriesData.length}
                         </span>
@@ -450,13 +676,18 @@ export default function Dashboard() {
           <TabsContent value="agronomy" className="space-y-6">
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <div className="lg:col-span-2">
-                {/* ✅ FIX: pasar props reales */}
                 <AgronomyChart
                   farmId={selectedFarmId}
                   selectedSensor={selectedSensor}
                 />
               </div>
-              <PhenologyPanel data={fincaAgronomy} variety={selectedFinca.variety} />
+
+              <PhenologyPanel
+                data={agronomyForPanels as any}
+                variety={selectedFinca.variety}
+                farmId={selectedFarmId}
+                selectedSensor={selectedSensor}
+              />
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -535,7 +766,9 @@ export default function Dashboard() {
                 <LeafletMap
                   selectedFarmId={selectedFarmId}
                   onFarmChange={handleFarmChange}
-                  allowedFarms={user.allowedFarms === "all" ? undefined : user.allowedFarms}
+                  allowedFarms={
+                    user.allowedFarms === "all" ? undefined : user.allowedFarms
+                  }
                 />
               </div>
 
@@ -572,6 +805,14 @@ export default function Dashboard() {
             </div>
           </TabsContent>
         </Tabs>
+
+        {/* (Opcional) debug pequeño, puedes borrar */}
+        {/* 
+        <div className="mt-4 text-xs text-muted-foreground">
+          soilParamsLoading: {String(soilParamsLoading)} | soilParams:{" "}
+          {soilParams ? "OK" : "null"}
+        </div> 
+        */}
       </main>
     </div>
   );
