@@ -41,7 +41,7 @@ export const farmsConfig: FarmConfig[] = [
         model: 'NM-TH-EU',
         type: 'ambient',
         devEUI: '24-e1-24-13-6e-31-41-71',
-        coordinates: { lat: 37.12, lng: -4.56 },
+        coordinates: { lat: 37.11687, lng: -4.56079 },
         farmId: 'Finca_Antequera',
       },
       {
@@ -51,7 +51,7 @@ export const farmsConfig: FarmConfig[] = [
         model: 'NM-EM500-SMTC-EU',
         type: 'soil',
         devEUI: '24-e1-24-12-6e-39-88-96',
-        coordinates: { lat: 37.12, lng: -4.561 },
+        coordinates: { lat: 37.11687, lng: -4.56079 },
         farmId: 'Finca_Antequera',
       },
       {
@@ -61,7 +61,7 @@ export const farmsConfig: FarmConfig[] = [
         model: 'NM-EM500-SMTC-EU',
         type: 'soil',
         devEUI: '24-e1-24-12-6e-39-88-24',
-        coordinates: { lat: 37.11, lng: -4.56 },
+        coordinates: { lat: 37.10909, lng: -4.56031 },
         farmId: 'Finca_Antequera',
       },
       {
@@ -71,7 +71,7 @@ export const farmsConfig: FarmConfig[] = [
         model: 'NM-TH-EU',
         type: 'ambient',
         devEUI: '24-e1-24-13-6e-31-16-42',
-        coordinates: { lat: 37.11, lng: -4.57 },
+        coordinates: { lat: 37.10771, lng: -4.56543 },
         farmId: 'Finca_Antequera',
       },
       {
@@ -81,7 +81,7 @@ export const farmsConfig: FarmConfig[] = [
         model: 'NM-EM500-SMTC-EU',
         type: 'soil',
         devEUI: '24-e1-24-12-6e-39-53-75',
-        coordinates: { lat: 37.11, lng: -4.571 },
+        coordinates: { lat: 37.10771, lng: -4.56543 },
         farmId: 'Finca_Antequera',
       },
       {
@@ -91,7 +91,7 @@ export const farmsConfig: FarmConfig[] = [
         model: 'NM-EM500-SMTC-EU',
         type: 'soil',
         devEUI: '24-e1-24-12-6e-39-76-93',
-        coordinates: { lat: 37.12, lng: -4.58 },
+        coordinates: { lat: 37.11912, lng: -4.57697 },
         farmId: 'Finca_Antequera',
       },
 
@@ -104,7 +104,7 @@ export const farmsConfig: FarmConfig[] = [
         model: 'NM-EM500-SMTC-EU',
         type: 'soil',
         devEUI: '24-e1-24-12-6e-39-74-89',
-        coordinates: { lat: 37.12, lng: -4.56 },
+        coordinates: { lat: 37.11536, lng: -4.57442 },
         farmId: 'Finca_Antequera',
       },
       {
@@ -114,7 +114,7 @@ export const farmsConfig: FarmConfig[] = [
         model: 'NM-EM500-SMTC-EU',
         type: 'soil',
         devEUI: '24-e1-24-12-6e-39-59-50',
-        coordinates: { lat: 37.11, lng: -4.57 },
+        coordinates: { lat: 37.11359, lng: -4.56971 },
         farmId: 'Finca_Antequera',
       },
       {
@@ -124,7 +124,7 @@ export const farmsConfig: FarmConfig[] = [
         model: 'NM-TH-EU',
         type: 'ambient',
         devEUI: '24-e1-24-13-6e-31-09-22',
-        coordinates: { lat: 37.11, lng: -4.57 },
+        coordinates: { lat: 37.10806, lng: -4.57301 },
         farmId: 'Finca_Antequera',
       },
       {
@@ -134,7 +134,7 @@ export const farmsConfig: FarmConfig[] = [
         model: 'NM-EM500-SMTC-EU',
         type: 'soil',
         devEUI: '24-e1-24-12-6e-39-68-14',
-        coordinates: { lat: 37.1, lng: -4.57 },
+        coordinates: { lat: 37.10313, lng: -4.5742 },
         farmId: 'Finca_Antequera',
       },
       {
@@ -144,7 +144,7 @@ export const farmsConfig: FarmConfig[] = [
         model: 'NM-TH-EU',
         type: 'ambient',
         devEUI: '24-e1-24-13-6e-31-18-84',
-        coordinates: { lat: 37.09, lng: -4.6 },
+        coordinates: { lat: 37.08522, lng: -4.59687 },
         farmId: 'Finca_Antequera',
       },
       {
@@ -154,7 +154,7 @@ export const farmsConfig: FarmConfig[] = [
         model: 'NM-EM500-SMTC-EU',
         type: 'soil',
         devEUI: '24-e1-24-12-6e-39-65-99',
-        coordinates: { lat: 37.09, lng: -4.6 },
+        coordinates: { lat: 37.08522, lng: -4.59687 },
         farmId: 'Finca_Antequera',
       },
     ],

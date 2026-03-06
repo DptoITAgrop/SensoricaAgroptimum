@@ -82,10 +82,6 @@ function isAllowedSoilSensor(sensorName: string) {
  * Expresión SQL para fecha:
  * - Si parece epoch en segundos/ms: FROM_UNIXTIME
  * - Si es DATETIME: col
- *
- * Nota: FROM_UNIXTIME depende del time_zone de la sesión MySQL.
- * Si tu DATETIME está en hora local, y el server también, será consistente.
- * Si guardas UTC en DATETIME pero el server está en local, habría que ajustar.
  */
 function buildDateExpr(dateColEscaped: string, dateColName: string) {
   const n = dateColName.toLowerCase();
@@ -104,15 +100,7 @@ function buildDateExpr(dateColEscaped: string, dateColName: string) {
 }
 
 /**
- * ✅ HF por tiempo real entre lecturas (DELTA):
- * - Sumamos SOLO el delta de tiempo real (segundos) cuando T está en [0, 7.2].
- * - No se cuentan valores negativos.
- * - Capamos el delta máximo para no inflar por gaps.
- * - Si delta es NULL (primera fila), cuenta 0.
- *
- * Además, contabilizamos:
- * - cappedGaps: número de veces que el delta supera el cap (para auditoría)
- * - countedPoints: número de intervalos que aportan >0 segundos (para auditoría)
+ * ✅ HF por tiempo real entre lecturas (DELTA)
  */
 function deltaSecondsContributionSQL(maxGapSeconds: number) {
   return `
@@ -143,12 +131,9 @@ function countedIntervalSQL() {
 }
 
 /**
- * ✅ HF por muestras fijas (FIXED):
- * - Cada fila con T en [0, 7.2] suma hoursPerSample.
- * - Útil para comparar si “asumimos” frecuencia fija (ej 10 min).
+ * ✅ HF por muestras fijas (FIXED)
  */
 function fixedContributionSQL(hoursPerSample: number) {
-  // hoursPerSample se inyecta como literal seguro (número) desde TS
   return `
     CASE
       WHEN temp >= 0 AND temp <= 7.2 THEN ${hoursPerSample}
@@ -199,8 +184,12 @@ export async function GET(
   const rangeMode = (searchParams.get("range") || "campaign").toLowerCase();
   const allowCustomRange = rangeMode === "custom";
 
-  const startDateParam = allowCustomRange ? searchParams.get("startDate") || undefined : undefined;
-  const endDateParam = allowCustomRange ? searchParams.get("endDate") || undefined : undefined;
+  const startDateParam = allowCustomRange
+    ? searchParams.get("startDate") || undefined
+    : undefined;
+  const endDateParam = allowCustomRange
+    ? searchParams.get("endDate") || undefined
+    : undefined;
 
   /**
    * ✅ Modo:
@@ -257,7 +246,13 @@ export async function GET(
   let connection: any;
 
   try {
-    const sensors = sensorId ? [sensorId] : await getSensorsForFarm(farmId as FarmName);
+    // ✅ Si no hay sensorId, es "ALL" (promediar en serie)
+    const isAllSensors = !sensorId;
+
+    const sensors = sensorId
+      ? [sensorId]
+      : await getSensorsForFarm(farmId as FarmName);
+
     connection = await getConnection(farmId as FarmName);
 
     const perSensorSeries: Array<Array<{ date: string; dailyUnits: number }>> = [];
@@ -270,7 +265,7 @@ export async function GET(
 
       // auditoría
       countedPoints: number;
-      cappedGaps?: number;   // solo delta
+      cappedGaps?: number; // solo delta
       totalSeconds?: number; // solo delta
 
       skippedReason?: string;
@@ -314,7 +309,8 @@ export async function GET(
           pickColumn(columnNames, ["temperature", "temperatura", "temp"]) || null;
 
         const dateColumn =
-          pickColumn(columnNames, ["datetime", "fecha", "timestamp", "date", "time"]) || null;
+          pickColumn(columnNames, ["datetime", "fecha", "timestamp", "date", "time"]) ||
+          null;
 
         if (!tempColumn || !dateColumn) {
           results.push({
@@ -337,14 +333,9 @@ export async function GET(
         const dateColEscaped = escapeId(dateColumn);
         const dateExpr = buildDateExpr(dateColEscaped, dateColumn);
 
-        /**
-         * ✅ Importante:
-         * Calculamos dt una vez y luego usamos LAG(dt) para evitar recalcular el CASE.
-         */
         let rows: any[] = [];
 
         if (mode === "fixed") {
-          // FIXED: cada fila en rango suma hoursPerSample si temp ∈ [0..7.2]
           const [q] = await connection.query(
             `
             SELECT
@@ -366,7 +357,6 @@ export async function GET(
           );
           rows = q as any[];
         } else {
-          // DELTA: suma deltas reales capados
           const [q] = await connection.query(
             `
             SELECT
@@ -431,17 +421,29 @@ export async function GET(
           [rangeStart, endDate]
         );
 
-        const totalDataPoints = (totalRows as Array<{ total: number }>)[0]?.total || 0;
+        const totalDataPoints =
+          (totalRows as Array<{ total: number }>)[0]?.total || 0;
 
-        // auditoría total por sensor
-        const countedPoints = rows.reduce((acc: number, r: any) => acc + (Number(r.countedPoints) || 0), 0);
-        const cappedGaps = mode === "delta"
-          ? rows.reduce((acc: number, r: any) => acc + (Number(r.cappedGaps) || 0), 0)
-          : undefined;
+        const countedPoints = rows.reduce(
+          (acc: number, r: any) => acc + (Number(r.countedPoints) || 0),
+          0
+        );
 
-        const totalSeconds = mode === "delta"
-          ? rows.reduce((acc: number, r: any) => acc + (Number(r.totalSeconds) || 0), 0)
-          : undefined;
+        const cappedGaps =
+          mode === "delta"
+            ? rows.reduce(
+                (acc: number, r: any) => acc + (Number(r.cappedGaps) || 0),
+                0
+              )
+            : undefined;
+
+        const totalSeconds =
+          mode === "delta"
+            ? rows.reduce(
+                (acc: number, r: any) => acc + (Number(r.totalSeconds) || 0),
+                0
+              )
+            : undefined;
 
         results.push({
           sensor,
@@ -475,38 +477,66 @@ export async function GET(
       }
     }
 
-    // ---- merge series (TOTAL FINCA)
-    const mergedSum = new Map<string, { sum: number; count: number }>();
+    // ---------------------------------------------------------
+    // ✅ MERGE SERIES:
+    // - Si isAllSensors: devolvemos la MEDIA diaria (para pintar la línea verde)
+    // - Si sensorId: solo 1 sensor => media == suma
+    // ---------------------------------------------------------
+    const merged = new Map<string, { sum: number; count: number }>();
 
     for (const serie of perSensorSeries) {
       for (const p of serie) {
-        const cur = mergedSum.get(p.date) || { sum: 0, count: 0 };
+        const cur = merged.get(p.date) || { sum: 0, count: 0 };
         cur.sum += p.dailyUnits;
         cur.count += 1;
-        mergedSum.set(p.date, cur);
+        merged.set(p.date, cur);
       }
     }
 
-    const seriesDailySum = Array.from(mergedSum.entries())
+    const seriesDaily = Array.from(merged.entries())
       .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([date, v]) => ({
-        date,
-        dailyUnits: round1(v.sum),
-      }));
+      .map(([date, v]) => {
+        // ✅ clave del cambio:
+        // ALL => avg por día; 1 sensor => v.count=1
+        const dailyUnits = isAllSensors ? v.sum / Math.max(1, v.count) : v.sum;
+        return { date, dailyUnits: round1(dailyUnits) };
+      });
 
-    let cumSum = 0;
-    const seriesSum = seriesDailySum.map((d) => {
-      cumSum = round1(cumSum + d.dailyUnits);
-      return { ...d, cumulative: cumSum };
+    let cumulative = 0;
+    const series = seriesDaily.map((d) => {
+      cumulative = round1(cumulative + d.dailyUnits);
+      return { ...d, cumulative };
     });
 
-    const totalChillHours = seriesSum.length ? seriesSum[seriesSum.length - 1].cumulative : 0;
+    // ✅ Este total ahora es el que pintas como “línea verde” cuando ALL:
+    // acumulado de la MEDIA diaria.
+    const totalChillHours = series.length ? series[series.length - 1].cumulative : 0;
 
-    const validSensors = results.filter((r) => !r.skippedReason && Number.isFinite(r.chillHours));
+    // (Opcional) total por SUMA real de todos los sensores (por si lo quieres en un KPI)
+    const totalChillHoursSum = (() => {
+      const seriesDailySum = Array.from(merged.entries())
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([date, v]) => ({ date, dailyUnits: round1(v.sum) }));
 
+      let cum = 0;
+      const s = seriesDailySum.map((d) => {
+        cum = round1(cum + d.dailyUnits);
+        return { ...d, cumulative: cum };
+      });
+      return s.length ? s[s.length - 1].cumulative : 0;
+    })();
+
+    const validSensors = results.filter(
+      (r) => !r.skippedReason && Number.isFinite(r.chillHours)
+    );
+
+    // media de totales por sensor (también útil como KPI)
     const avgChillHours =
       validSensors.length > 0
-        ? round1(validSensors.reduce((s, r) => s + (r.chillHours || 0), 0) / validSensors.length)
+        ? round1(
+            validSensors.reduce((s, r) => s + (r.chillHours || 0), 0) /
+              validSensors.length
+          )
         : 0;
 
     return NextResponse.json({
@@ -515,13 +545,23 @@ export async function GET(
       queryRange: { start: startDate, end: endDate },
       sensors: results,
 
-      // ✅ TOTAL FINCA (suma de diarios)
-      series: { daily: seriesSum },
+      // ✅ SERIE QUE USA LA GRÁFICA:
+      // - ALL => MEDIA diaria + acumulada (lo que tú quieres)
+      // - 1 sensor => igual
+      series: { daily: series },
 
       summary: {
+        // ✅ ahora: acumulado de la MEDIA (para la línea verde con "all")
         totalChillHours,
+
+        // ✅ extra (por si lo quieres mostrar como “total finca sumando sensores”)
+        totalChillHoursSum,
+
+        // ✅ KPI: media de totales por sensor
         avgChillHours,
+
         sensorCount: validSensors.length,
+        seriesMode: isAllSensors ? "avg_daily" : "single_sensor",
       },
 
       sampling: {
@@ -546,6 +586,10 @@ export async function GET(
         rangeMode: allowCustomRange ? "custom" : "campaign",
         dateFilter: "[start 00:00:00, end+1day 00:00:00)",
         ...(mode === "delta" ? { deltaCap: `cap_delta<=${maxGapMinutes}min` } : {}),
+        merge:
+          isAllSensors
+            ? "series_daily = AVG(dailyUnits) across sensors; cumulative = cumsum(avg_daily)"
+            : "series_daily = sensor dailyUnits; cumulative = cumsum(daily)",
       },
     });
   } catch (error: any) {

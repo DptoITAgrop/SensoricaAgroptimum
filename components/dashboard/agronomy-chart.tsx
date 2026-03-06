@@ -70,8 +70,14 @@ type ChillApi = {
       cumulative: number;
     }>;
   };
+  summary?: {
+    totalChillHours?: number;
+    avgChillHours?: number;
+    sensorCount?: number;
+  };
   error?: string;
   details?: string;
+  url?: string;
 };
 
 type GddApi = {
@@ -101,6 +107,7 @@ type GddApi = {
   };
   error?: string;
   details?: string;
+  url?: string;
 };
 
 type PhenologyApi = {
@@ -140,11 +147,12 @@ type PhenologyApi = {
   };
   error?: string;
   details?: string;
+  url?: string;
 };
 
 /**
- * ✅ NUEVO contrato NASA histórico:
- * meta: { latitude, longitude, years, baseTemp, campaignYear, histYears, ... }
+ * ✅ Contrato NASA histórico (GDD):
+ * meta: { latitude, longitude, years, baseTemp, campaignYear, ... }
  * series: [{ date(2000-..), md, isoCampaign, historicAvg, historicP25, historicP75, campaign }]
  */
 type FarmGddHistoricalApi = {
@@ -173,6 +181,38 @@ type FarmGddHistoricalApi = {
   url?: string;
 };
 
+/**
+ * ✅ Contrato NASA histórico (HF):
+ * meta: { latitude, longitude, years, campaignYear, chillRange, ... }
+ * series: igual estructura que GDD histórico
+ */
+type FarmChillHistoricalApi = {
+  meta?: {
+    source: string;
+    temporal?: string;
+    latitude: number;
+    longitude: number;
+    years: number;
+    campaignYear?: number;
+    histYears?: number[];
+    chillRange?: { minTemp: number; maxTemp: number };
+    season?: { startDate: string; endDate: string }; // ancla
+    campaignSeason?: { startDate: string; endDate: string }; // real
+  };
+  series?: Array<{
+    date: string; // "2000-11-01" ...
+    md?: string; // "11-01"
+    isoCampaign?: string; // "2024-11-01"
+    historicAvg: number | null;
+    historicP25?: number | null;
+    historicP75?: number | null;
+    campaign?: number | null; // acumulado campaña seleccionada
+  }>;
+  error?: string;
+  details?: string;
+  url?: string;
+};
+
 interface AgronomyChartProps {
   farmId: string;
   selectedSensor?: string;
@@ -191,7 +231,6 @@ function formatDayLabel(yyyyMmDd: string) {
 
 /** label "01 abr" desde "MM-DD" */
 function formatDayLabelFromMd(md: string) {
-  // md = "04-01"
   const fake = `2000-${md}`;
   return formatDayLabel(fake);
 }
@@ -213,14 +252,21 @@ function isValidISODate(d: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(d);
 }
 
-function getHFCampaignRange(): { startDate: string; endDate: string } {
+/**
+ * ✅ HF campaign (Nov 1 -> Mar 1)
+ * - endDateRaw: Mar 1 (sin clamp)
+ * - endDate: clamped a hoy (para campaña actual parcial)
+ */
+function getHFCampaignRange(): { startDate: string; endDate: string; endDateRaw: string } {
   const now = new Date();
   const currentYear = now.getFullYear();
   const startYear = now.getMonth() < 10 ? currentYear - 1 : currentYear;
 
   const start = ymd(new Date(startYear, 10, 1)); // Nov 1
-  const end = ymd(new Date(startYear + 1, 2, 1)); // Mar 1
-  return { startDate: start, endDate: clampYmdToToday(end) };
+  const endRaw = ymd(new Date(startYear + 1, 2, 1)); // Mar 1
+  const end = clampYmdToToday(endRaw);
+
+  return { startDate: start, endDateRaw: endRaw, endDate: end };
 }
 
 /**
@@ -311,7 +357,7 @@ export function AgronomyChart({
 
   const [histYears, setHistYears] = useState<10 | 20>(10);
 
-  // ✅ NUEVO: selector de año de campaña para NASA
+  // ✅ selector de año de campaña para NASA
   const [nasaCampaignYear, setNasaCampaignYear] = useState<number>(() => currentYear());
 
   // =========================
@@ -320,7 +366,8 @@ export function AgronomyChart({
   useEffect(() => {
     if (!farmId) return;
     const key = storageKeyGddStart(farmId, isSingleSensor ? selectedSensor : "all");
-    const saved = typeof window !== "undefined" ? window.localStorage.getItem(key) : null;
+    const saved =
+      typeof window !== "undefined" ? window.localStorage.getItem(key) : null;
 
     if (saved && isValidISODate(saved)) setGddStartDate(saved);
     else setGddStartDate(defaultGddStart(gddCampaign.startDate));
@@ -338,7 +385,8 @@ export function AgronomyChart({
     if (!farmId) return;
 
     const key = storageKeyNasaCoords(farmId);
-    const saved = typeof window !== "undefined" ? window.localStorage.getItem(key) : null;
+    const saved =
+      typeof window !== "undefined" ? window.localStorage.getItem(key) : null;
 
     if (saved) {
       try {
@@ -360,7 +408,8 @@ export function AgronomyChart({
   useEffect(() => {
     if (!farmId) return;
     const key = storageKeyNasaCampaignYear(farmId);
-    const saved = typeof window !== "undefined" ? window.localStorage.getItem(key) : null;
+    const saved =
+      typeof window !== "undefined" ? window.localStorage.getItem(key) : null;
     const y = Number(saved);
     if (Number.isFinite(y) && y > 1900 && y < 2200) setNasaCampaignYear(y);
     else setNasaCampaignYear(currentYear());
@@ -387,7 +436,9 @@ export function AgronomyChart({
   const coords = useMemo(() => {
     const lat = Number(latInput);
     const lng = Number(lngInput);
-    if (Number.isFinite(lat) && Number.isFinite(lng)) return { lat, lng, ok: true as const };
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      return { lat, lng, ok: true as const };
+    }
     return { lat: null, lng: null, ok: false as const };
   }, [latInput, lngInput]);
 
@@ -405,14 +456,22 @@ export function AgronomyChart({
     if (isSingleSensor) p.set("sensor", selectedSensor!);
 
     return `/api/farms/${encodeURIComponent(farmId)}/chill-hours?${p.toString()}`;
-  }, [farmId, hfCampaign.startDate, hfCampaign.endDate, isSingleSensor, selectedSensor]);
+  }, [
+    farmId,
+    hfCampaign.startDate,
+    hfCampaign.endDate,
+    isSingleSensor,
+    selectedSensor,
+  ]);
 
   const gddUrl = useMemo(() => {
     if (!farmId) return null;
     if (!gddCampaign.isActive) return null;
 
     const start =
-      gddStartDate && isValidISODate(gddStartDate) ? gddStartDate : gddCampaign.startDate;
+      gddStartDate && isValidISODate(gddStartDate)
+        ? gddStartDate
+        : gddCampaign.startDate;
 
     const safeStart = start > gddCampaign.endDate ? gddCampaign.endDate : start;
 
@@ -440,7 +499,9 @@ export function AgronomyChart({
     if (!gddStartDate || !isValidISODate(gddStartDate)) return null;
 
     const start =
-      gddStartDate && isValidISODate(gddStartDate) ? gddStartDate : gddCampaign.startDate;
+      gddStartDate && isValidISODate(gddStartDate)
+        ? gddStartDate
+        : gddCampaign.startDate;
 
     const safeStart = start > gddCampaign.endDate ? gddCampaign.endDate : start;
 
@@ -463,13 +524,7 @@ export function AgronomyChart({
   ]);
 
   /**
-   * ✅ NASA histórico
-   * - Siempre campaña GDD completa (Abr -> Sep): startDate / endDateRaw
-   * - Añadimos campaignYear (selector)
-   *
-   * IMPORTANTE:
-   * Si tu endpoint es DIRECTO a NASA: cambia "/api/farms/.../gdd-historical"
-   * por "/api/nasa-power/gdd-historical" y listo.
+   * ✅ NASA histórico (GDD)
    */
   const nasaHistUrl = useMemo(() => {
     if (!farmId) return null;
@@ -485,7 +540,7 @@ export function AgronomyChart({
     p.set("startDate", gddCampaign.startDate);
     p.set("endDate", gddCampaign.endDateRaw);
 
-    // ✅ año de campaña a mostrar
+    // año de campaña a mostrar
     p.set("campaignYear", String(nasaCampaignYear));
 
     return `/api/farms/${encodeURIComponent(farmId)}/gdd-historical?${p.toString()}`;
@@ -498,6 +553,41 @@ export function AgronomyChart({
     histYears,
     gddCampaign.startDate,
     gddCampaign.endDateRaw,
+    nasaCampaignYear,
+  ]);
+
+  /**
+   * ✅ NASA histórico (HF)
+   * Usa tu endpoint nuevo: /api/nasa-power/chill-hours-historical
+   * Campaña base HF: Nov -> Mar (end RAW para alinear años completos)
+   */
+  const nasaHfHistUrl = useMemo(() => {
+    if (!coords.ok) return null;
+
+    const p = new URLSearchParams();
+    p.set("lat", String(coords.lat));
+    p.set("lon", String(coords.lng));
+    p.set("years", String(histYears));
+
+    // campaña HF típica
+    p.set("startDate", hfCampaign.startDate);
+    p.set("endDate", hfCampaign.endDateRaw);
+
+    // año de campaña a mostrar
+    p.set("campaignYear", String(nasaCampaignYear));
+
+    // rango por defecto (si quieres otro, lo cambias desde UI en el futuro)
+    p.set("minTemp", "0");
+    p.set("maxTemp", "7.2");
+
+    return `/api/nasa-power/chill-hours-historical?${p.toString()}`;
+  }, [
+    coords.ok,
+    coords.lat,
+    coords.lng,
+    histYears,
+    hfCampaign.startDate,
+    hfCampaign.endDateRaw,
     nasaCampaignYear,
   ]);
 
@@ -522,25 +612,46 @@ export function AgronomyChart({
     keepPreviousData: true,
   });
 
-  const { data: nasaHistApi, isLoading: nasaHistLoading } = useSWR<FarmGddHistoricalApi>(
-    nasaHistUrl,
-    fetcher,
-    {
+  const { data: nasaHistApi, isLoading: nasaHistLoading } =
+    useSWR<FarmGddHistoricalApi>(nasaHistUrl, fetcher, {
       refreshInterval: 6 * 60 * 60 * 1000,
       revalidateOnFocus: false,
       keepPreviousData: true,
-    }
-  );
+    });
+
+  const { data: nasaHfHistApi, isLoading: nasaHfHistLoading } =
+    useSWR<FarmChillHistoricalApi>(nasaHfHistUrl, fetcher, {
+      refreshInterval: 6 * 60 * 60 * 1000,
+      revalidateOnFocus: false,
+      keepPreviousData: true,
+    });
 
   // ==========
   // Data maps
   // ==========
+
+  /**
+   * ✅ FIX #1:
+   * Cuando se seleccionan "todos los sensores", la API te devuelve la SERIE SUMADA.
+   * Para pintar MEDIA (lo que pides), escalamos por sensorCount.
+   */
+  const hfSensorCount = useMemo(() => {
+    const n = Number(chillApi?.summary?.sensorCount);
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  }, [chillApi]);
+
+  const hfScale = isSingleSensor ? 1 : hfSensorCount;
+
   const chillData = useMemo(() => {
     const rows = chillApi?.series?.daily ?? [];
     return rows
-      .map((r) => ({ dateRaw: r.date, daily: r.dailyUnits, accumulated: r.cumulative }))
+      .map((r) => ({
+        dateRaw: r.date,
+        daily: r.dailyUnits / hfScale,
+        accumulated: r.cumulative / hfScale,
+      }))
       .sort((a, b) => a.dateRaw.localeCompare(b.dateRaw));
-  }, [chillApi]);
+  }, [chillApi, hfScale]);
 
   const gddData = useMemo(() => {
     const rows = gddApi?.series?.daily ?? [];
@@ -550,12 +661,7 @@ export function AgronomyChart({
   }, [gddApi]);
 
   /**
-   * ✅ Adaptar NASA:
-   * - xKey = md (no enseñamos 2000)
-   * - campaignCumulative = r.campaign
-   * - avgCumulative = r.historicAvg
-   * - p25/p75 banda
-   * - tooltipDate = isoCampaign (fecha real del año elegido)
+   * ✅ Adaptar NASA (GDD):
    */
   const nasaHistChartData = useMemo(() => {
     const rows = nasaHistApi?.series;
@@ -563,7 +669,7 @@ export function AgronomyChart({
 
     return rows.map((r) => ({
       x: r.md || r.date.slice(5), // "04-01"
-      tooltipDate: r.isoCampaign || r.date, // "2024-04-01" si viene
+      tooltipDate: r.isoCampaign || r.date,
       avgCumulative: r.historicAvg ?? null,
       campaignCumulative: r.campaign ?? null,
       p25: r.historicP25 ?? null,
@@ -571,15 +677,35 @@ export function AgronomyChart({
     }));
   }, [nasaHistApi]);
 
+  /**
+   * ✅ Adaptar NASA (HF):
+   */
+  const nasaHfHistChartData = useMemo(() => {
+    const rows = nasaHfHistApi?.series;
+    if (!Array.isArray(rows)) return [];
+
+    return rows.map((r) => ({
+      x: r.md || r.date.slice(5), // "11-01"
+      tooltipDate: r.isoCampaign || r.date,
+      avgCumulative: r.historicAvg ?? null,
+      campaignCumulative: r.campaign ?? null,
+      p25: r.historicP25 ?? null,
+      p75: r.historicP75 ?? null,
+    }));
+  }, [nasaHfHistApi]);
+
   // ==========
   // Configs
   // ==========
+
   const chillConfig = useMemo(
     () => ({
-      daily: { label: "HF diarias", color: CYAN },
-      accumulated: { label: "HF acumuladas", color: GREEN },
+      daily: { label: isSingleSensor ? "HF diarias" : "HF diarias (media)",
+        color: CYAN },
+      accumulated: { label: isSingleSensor ? "HF acumuladas" : "HF acumuladas (media)",
+        color: GREEN },
     }),
-    []
+    [isSingleSensor]
   );
 
   const gddConfig = useMemo(
@@ -617,15 +743,23 @@ export function AgronomyChart({
     gdd900: gddApi?.thresholds?.gdd900 ?? 900,
   };
 
-  const totalGdd = (hasGdd ? gddData[gddData.length - 1].accumulated : 0) ?? 0;
+  const totalGdd =
+    (hasGdd ? gddData[gddData.length - 1].accumulated : 0) ?? 0;
 
-  const remainingTo450 = Math.max(0, Math.round((thresholds.gdd450 - totalGdd) * 10) / 10);
-  const remainingTo900 = Math.max(0, Math.round((thresholds.gdd900 - totalGdd) * 10) / 10);
+  const remainingTo450 = Math.max(
+    0,
+    Math.round((thresholds.gdd450 - totalGdd) * 10) / 10
+  );
+  const remainingTo900 = Math.max(
+    0,
+    Math.round((thresholds.gdd900 - totalGdd) * 10) / 10
+  );
 
   const reached450 = totalGdd >= thresholds.gdd450;
   const reached900 = totalGdd >= thresholds.gdd900;
 
-  const inWindow450_900 = totalGdd >= thresholds.gdd450 && totalGdd < thresholds.gdd900;
+  const inWindow450_900 =
+    totalGdd >= thresholds.gdd450 && totalGdd < thresholds.gdd900;
 
   const phenology = phenologyApi?.phenology;
   const milestones = phenology?.milestones ?? [];
@@ -728,7 +862,8 @@ export function AgronomyChart({
                 onClick={() => {
                   const lat = Number(latInput);
                   const lng = Number(lngInput);
-                  if (Number.isFinite(lat) && Number.isFinite(lng)) saveCoordsOverride(lat, lng);
+                  if (Number.isFinite(lat) && Number.isFinite(lng))
+                    saveCoordsOverride(lat, lng);
                 }}
                 className="h-7 rounded-md border border-border bg-secondary px-2 text-xs text-foreground"
               >
@@ -744,18 +879,23 @@ export function AgronomyChart({
               </button>
 
               <div className="ml-auto flex flex-wrap items-center gap-2">
-                <span className="text-[11px] text-muted-foreground">Histórico:</span>
+                <span className="text-[11px] text-muted-foreground">
+                  Histórico:
+                </span>
                 <select
                   value={histYears}
-                  onChange={(e) => setHistYears((Number(e.target.value) as any) || 10)}
+                  onChange={(e) =>
+                    setHistYears((Number(e.target.value) as any) || 10)
+                  }
                   className="h-7 rounded-md border border-border bg-background px-2 text-xs text-foreground"
                 >
                   <option value={10}>10 años</option>
                   <option value={20}>20 años</option>
                 </select>
 
-                {/* ✅ NUEVO selector de campaña */}
-                <span className="ml-2 text-[11px] text-muted-foreground">Campaña:</span>
+                <span className="ml-2 text-[11px] text-muted-foreground">
+                  Campaña:
+                </span>
                 <select
                   value={nasaCampaignYear}
                   onChange={(e) => setNasaCampaignYear(Number(e.target.value))}
@@ -792,24 +932,33 @@ export function AgronomyChart({
                 </div>
 
                 <div className="text-right">
-                  <span className="text-[11px] text-muted-foreground">Próxima fase</span>
-                  <div className="text-xs text-foreground">{nextPhase ? nextPhase.name : "—"}</div>
+                  <span className="text-[11px] text-muted-foreground">
+                    Próxima fase
+                  </span>
+                  <div className="text-xs text-foreground">
+                    {nextPhase ? nextPhase.name : "—"}
+                  </div>
                   <div className="text-[11px] text-muted-foreground">
                     {(() => {
                       if (!nextPhase || !milestones.length) return "";
                       const m = milestones.find((x) => x.key === nextPhase.key);
                       if (!m) return "";
                       if (m.reached && m.date) return `✅ ${m.date}`;
-                      if (!m.reached && m.projectedDate) return `📅 ${m.projectedDate} (estimada)`;
+                      if (!m.reached && m.projectedDate)
+                        return `📅 ${m.projectedDate} (estimada)`;
                       return "";
                     })()}
                   </div>
                 </div>
 
                 <div className="min-w-[120px]">
-                  <span className="text-[11px] text-muted-foreground">Progreso a la próxima</span>
+                  <span className="text-[11px] text-muted-foreground">
+                    Progreso a la próxima
+                  </span>
                   <div className="text-xs text-foreground">
-                    {typeof progressToNextPct === "number" ? `${progressToNextPct}%` : "—"}
+                    {typeof progressToNextPct === "number"
+                      ? `${progressToNextPct}%`
+                      : "—"}
                   </div>
                 </div>
               </div>
@@ -830,10 +979,18 @@ export function AgronomyChart({
                         const date = m.reached ? m.date : m.projectedDate || null;
                         return (
                           <tr key={m.key} className="border-t border-border/60">
-                            <td className="py-1 pr-2 text-left text-foreground">{m.name}</td>
-                            <td className="py-1 text-right text-foreground tabular-nums">{m.gddTarget}</td>
-                            <td className="py-1 text-right text-foreground tabular-nums">{date ?? "—"}</td>
-                            <td className="py-1 text-right text-foreground">{m.reached ? "✅ Alcanzada" : "⏳ Pendiente"}</td>
+                            <td className="py-1 pr-2 text-left text-foreground">
+                              {m.name}
+                            </td>
+                            <td className="py-1 text-right text-foreground tabular-nums">
+                              {m.gddTarget}
+                            </td>
+                            <td className="py-1 text-right text-foreground tabular-nums">
+                              {date ?? "—"}
+                            </td>
+                            <td className="py-1 text-right text-foreground">
+                              {m.reached ? "✅ Alcanzada" : "⏳ Pendiente"}
+                            </td>
                           </tr>
                         );
                       })}
@@ -847,7 +1004,9 @@ export function AgronomyChart({
               )}
 
               {phenologyApi?.error && (
-                <p className="mt-2 text-[11px] text-red-400">{phenologyApi.error}</p>
+                <p className="mt-2 text-[11px] text-red-400">
+                  {phenologyApi.error}
+                </p>
               )}
             </div>
           )}
@@ -869,15 +1028,27 @@ export function AgronomyChart({
             ) : (
               <ChartContainer config={chillConfig} className="h-[260px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={chillData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <ComposedChart
+                    data={chillData}
+                    margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                  >
                     <defs>
-                      <linearGradient id="accumulatedGradientChill" x1="0" y1="0" x2="0" y2="1">
+                      <linearGradient
+                        id="accumulatedGradientChill"
+                        x1="0"
+                        y1="0"
+                        x2="0"
+                        y2="1"
+                      >
                         <stop offset="5%" stopColor={GREEN} stopOpacity={0.3} />
                         <stop offset="95%" stopColor={GREEN} stopOpacity={0} />
                       </linearGradient>
                     </defs>
 
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="rgba(255,255,255,0.1)"
+                    />
 
                     <XAxis
                       dataKey="dateRaw"
@@ -888,8 +1059,19 @@ export function AgronomyChart({
                       interval={9}
                     />
 
-                    <YAxis yAxisId="left" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} tickLine={false} axisLine={false} />
-                    <YAxis yAxisId="right" orientation="right" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} tickLine={false} axisLine={false} />
+                    <YAxis
+                      yAxisId="left"
+                      tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <YAxis
+                      yAxisId="right"
+                      orientation="right"
+                      tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }}
+                      tickLine={false}
+                      axisLine={false}
+                    />
 
                     <ChartTooltip content={<ChartTooltipContent />} />
 
@@ -901,7 +1083,14 @@ export function AgronomyChart({
                       label={{ value: "Objetivo", fill: "#facc15", fontSize: 10 }}
                     />
 
-                    <Bar yAxisId="left" dataKey="daily" fill={CYAN} opacity={0.7} radius={[2, 2, 0, 0]} name="HF Diarias" />
+                    <Bar
+                      yAxisId="left"
+                      dataKey="daily"
+                      fill={CYAN}
+                      opacity={0.7}
+                      radius={[2, 2, 0, 0]}
+                      name={isSingleSensor ? "HF Diarias" : "HF Diarias (media)"}
+                    />
                     <Area
                       yAxisId="right"
                       type="monotone"
@@ -909,12 +1098,142 @@ export function AgronomyChart({
                       stroke={GREEN}
                       strokeWidth={2}
                       fill="url(#accumulatedGradientChill)"
-                      name="HF Acumuladas"
+                      name={isSingleSensor ? "HF Acumuladas" : "HF Acumuladas (media)"}
                     />
                   </ComposedChart>
                 </ResponsiveContainer>
               </ChartContainer>
             )}
+
+            {/* ✅ NUEVO: Histórico NASA HF */}
+            <div className="mt-4">
+              {!coords.ok ? (
+                <div className="h-[220px] w-full flex items-center justify-center text-sm text-muted-foreground">
+                  Introduce coordenadas para ver el histórico NASA (HF).
+                </div>
+              ) : nasaHfHistApi?.error ? (
+                <div className="h-[220px] w-full flex flex-col items-center justify-center text-sm">
+                  <p className="text-red-400 font-medium">
+                    Error cargando histórico NASA (HF)
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-2">
+                    {nasaHfHistApi.error}{" "}
+                    {nasaHfHistApi.details ? `— ${nasaHfHistApi.details}` : ""}
+                  </p>
+                  <p className="text-[10px] text-muted-foreground/70 mt-2">
+                    Revisa Network → {nasaHfHistUrl || "(sin url)"} para ver el payload.
+                  </p>
+                </div>
+              ) : nasaHfHistLoading ? (
+                <div className="h-[220px] w-full flex items-center justify-center text-sm text-muted-foreground">
+                  Cargando histórico NASA (HF)…
+                </div>
+              ) : nasaHfHistChartData.length === 0 ? (
+                <div className="h-[220px] w-full flex items-center justify-center text-sm text-muted-foreground">
+                  Sin datos de histórico NASA (HF) para estas coordenadas / campaña.
+                </div>
+              ) : (
+                <ChartContainer config={histConfig} className="h-[220px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart
+                      data={nasaHfHistChartData}
+                      margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                    >
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(255,255,255,0.1)"
+                      />
+
+                      <XAxis
+                        dataKey="x"
+                        tickFormatter={(md: string) => formatDayLabelFromMd(md)}
+                        tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }}
+                        tickLine={false}
+                        axisLine={false}
+                        interval={9}
+                      />
+
+                      <YAxis
+                        tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }}
+                        tickLine={false}
+                        axisLine={false}
+                      />
+
+                      <ChartTooltip
+                        content={
+                          <ChartTooltipContent
+                            labelFormatter={(x: any, payload: any) => {
+                              const p0 =
+                                Array.isArray(payload) && payload[0]?.payload
+                                  ? payload[0].payload
+                                  : null;
+                              const iso = p0?.tooltipDate;
+                              if (typeof iso === "string") return formatDayLabel(iso);
+                              if (typeof x === "string") return formatDayLabelFromMd(x);
+                              return String(x ?? "");
+                            }}
+                          />
+                        }
+                      />
+
+                      {/* Banda P25–P75 */}
+                      <Area
+                        type="monotone"
+                        dataKey="p75"
+                        stroke="transparent"
+                        fill={CYAN}
+                        fillOpacity={0.12}
+                        name="Rango histórico (P25–P75)"
+                        activeDot={false}
+                        dot={false}
+                        baseLine={(dataPoint: any) => dataPoint.p25}
+                      />
+
+                      <Line
+                        type="monotone"
+                        dataKey="avgCumulative"
+                        stroke={CYAN}
+                        strokeWidth={2}
+                        dot={false}
+                        name={`Media ${histYears} años (NASA)`}
+                      />
+
+                      <Line
+                        type="monotone"
+                        dataKey="campaignCumulative"
+                        stroke={GREEN}
+                        strokeWidth={2}
+                        dot={false}
+                        name={`Campaña ${nasaCampaignYear} (NASA)`}
+                      />
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </ChartContainer>
+              )}
+
+              {coords.ok &&
+                nasaHfHistApi?.meta &&
+                (() => {
+                  const lat = Number((nasaHfHistApi as any)?.meta?.latitude);
+                  const lon = Number((nasaHfHistApi as any)?.meta?.longitude);
+                  const years = (nasaHfHistApi as any)?.meta?.years;
+                  const campaignYearMeta =
+                    (nasaHfHistApi as any)?.meta?.campaignYear ?? nasaCampaignYear;
+                  const range = (nasaHfHistApi as any)?.meta?.chillRange;
+
+                  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+                  return (
+                    <p className="mt-1 text-[10px] text-muted-foreground/70">
+                      NASA POWER · ({lat.toFixed(4)}, {lon.toFixed(4)}) · hist {years} años · campaña{" "}
+                      {campaignYearMeta}
+                      {range?.minTemp != null && range?.maxTemp != null
+                        ? ` · HF [${range.minTemp}..${range.maxTemp}]`
+                        : ""}
+                    </p>
+                  );
+                })()}
+            </div>
           </TabsContent>
 
           <TabsContent value="gdd">
@@ -929,15 +1248,27 @@ export function AgronomyChart({
             ) : (
               <ChartContainer config={gddConfig} className="h-[260px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={gddData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <ComposedChart
+                    data={gddData}
+                    margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                  >
                     <defs>
-                      <linearGradient id="accumulatedGradientGdd" x1="0" y1="0" x2="0" y2="1">
+                      <linearGradient
+                        id="accumulatedGradientGdd"
+                        x1="0"
+                        y1="0"
+                        x2="0"
+                        y2="1"
+                      >
                         <stop offset="5%" stopColor={CYAN} stopOpacity={0.3} />
                         <stop offset="95%" stopColor={CYAN} stopOpacity={0} />
                       </linearGradient>
                     </defs>
 
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="rgba(255,255,255,0.1)"
+                    />
 
                     <XAxis
                       dataKey="dateRaw"
@@ -948,8 +1279,19 @@ export function AgronomyChart({
                       interval={9}
                     />
 
-                    <YAxis yAxisId="left" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} tickLine={false} axisLine={false} />
-                    <YAxis yAxisId="right" orientation="right" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} tickLine={false} axisLine={false} />
+                    <YAxis
+                      yAxisId="left"
+                      tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }}
+                      tickLine={false}
+                      axisLine={false}
+                    />
+                    <YAxis
+                      yAxisId="right"
+                      orientation="right"
+                      tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }}
+                      tickLine={false}
+                      axisLine={false}
+                    />
 
                     <ChartTooltip content={<ChartTooltipContent />} />
 
@@ -968,7 +1310,14 @@ export function AgronomyChart({
                       label={{ value: "900 GDD", fill: "#f97316", fontSize: 10 }}
                     />
 
-                    <Bar yAxisId="left" dataKey="daily" fill={GREEN} opacity={0.7} radius={[2, 2, 0, 0]} name="GDD Diarios" />
+                    <Bar
+                      yAxisId="left"
+                      dataKey="daily"
+                      fill={GREEN}
+                      opacity={0.7}
+                      radius={[2, 2, 0, 0]}
+                      name="GDD Diarios"
+                    />
                     <Area
                       yAxisId="right"
                       type="monotone"
@@ -983,7 +1332,7 @@ export function AgronomyChart({
               </ChartContainer>
             )}
 
-            {/* ✅ Histórico NASA */}
+            {/* ✅ Histórico NASA (GDD) */}
             <div className="mt-4">
               {!coords.ok ? (
                 <div className="h-[220px] w-full flex items-center justify-center text-sm text-muted-foreground">
@@ -991,9 +1340,12 @@ export function AgronomyChart({
                 </div>
               ) : nasaHistApi?.error ? (
                 <div className="h-[220px] w-full flex flex-col items-center justify-center text-sm">
-                  <p className="text-red-400 font-medium">Error cargando histórico NASA</p>
+                  <p className="text-red-400 font-medium">
+                    Error cargando histórico NASA
+                  </p>
                   <p className="text-xs text-muted-foreground mt-2">
-                    {nasaHistApi.error} {nasaHistApi.details ? `— ${nasaHistApi.details}` : ""}
+                    {nasaHistApi.error}{" "}
+                    {nasaHistApi.details ? `— ${nasaHistApi.details}` : ""}
                   </p>
                   <p className="text-[10px] text-muted-foreground/70 mt-2">
                     Revisa Network → {nasaHistUrl || "(sin url)"} para ver el payload.
@@ -1010,10 +1362,15 @@ export function AgronomyChart({
               ) : (
                 <ChartContainer config={histConfig} className="h-[220px] w-full">
                   <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={nasaHistChartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
+                    <ComposedChart
+                      data={nasaHistChartData}
+                      margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                    >
+                      <CartesianGrid
+                        strokeDasharray="3 3"
+                        stroke="rgba(255,255,255,0.1)"
+                      />
 
-                      {/* ✅ EJE X sin “2000”: usamos md */}
                       <XAxis
                         dataKey="x"
                         tickFormatter={(md: string) => formatDayLabelFromMd(md)}
@@ -1023,14 +1380,20 @@ export function AgronomyChart({
                         interval={9}
                       />
 
-                      <YAxis tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} tickLine={false} axisLine={false} />
+                      <YAxis
+                        tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }}
+                        tickLine={false}
+                        axisLine={false}
+                      />
 
-                      {/* ✅ Tooltip mostrando fecha REAL del año elegido */}
                       <ChartTooltip
                         content={
                           <ChartTooltipContent
                             labelFormatter={(x: any, payload: any) => {
-                              const p0 = Array.isArray(payload) && payload[0]?.payload ? payload[0].payload : null;
+                              const p0 =
+                                Array.isArray(payload) && payload[0]?.payload
+                                  ? payload[0].payload
+                                  : null;
                               const iso = p0?.tooltipDate;
                               if (typeof iso === "string") return formatDayLabel(iso);
                               if (typeof x === "string") return formatDayLabelFromMd(x);
@@ -1040,7 +1403,6 @@ export function AgronomyChart({
                         }
                       />
 
-                      {/* ✅ Banda P25–P75 (histórico) */}
                       <Area
                         type="monotone"
                         dataKey="p75"
@@ -1078,17 +1440,19 @@ export function AgronomyChart({
               {coords.ok &&
                 nasaHistApi?.meta &&
                 (() => {
-                  const lat = Number((nasaHistApi as any)?.meta?.latitude ?? (nasaHistApi as any)?.meta?.lat);
-                  const lon = Number((nasaHistApi as any)?.meta?.longitude ?? (nasaHistApi as any)?.meta?.lon);
+                  const lat = Number((nasaHistApi as any)?.meta?.latitude);
+                  const lon = Number((nasaHistApi as any)?.meta?.longitude);
                   const years = (nasaHistApi as any)?.meta?.years;
                   const baseTemp = (nasaHistApi as any)?.meta?.baseTemp;
-                  const campaignYearMeta = (nasaHistApi as any)?.meta?.campaignYear ?? nasaCampaignYear;
+                  const campaignYearMeta =
+                    (nasaHistApi as any)?.meta?.campaignYear ?? nasaCampaignYear;
 
                   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
 
                   return (
                     <p className="mt-1 text-[10px] text-muted-foreground/70">
-                      NASA POWER · ({lat.toFixed(4)}, {lon.toFixed(4)}) · base {baseTemp} · hist {years} años · campaña {campaignYearMeta}
+                      NASA POWER · ({lat.toFixed(4)}, {lon.toFixed(4)}) · base {baseTemp} · hist{" "}
+                      {years} años · campaña {campaignYearMeta}
                     </p>
                   );
                 })()}
